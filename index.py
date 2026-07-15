@@ -22,10 +22,24 @@ if getattr(sys, 'frozen', False):
     os.makedirs(DATA_DIR, exist_ok=True)
     CONFIG_FILE = os.path.join(DATA_DIR, "app_config.json")
     DB_FILE = os.path.join(DATA_DIR, "tests.db")
+    LOG_FILE = os.path.join(DATA_DIR, "app.log")
 else:
     CONFIG_FILE = "app_config.json"
     DB_FILE = "tests.db"
+    LOG_FILE = "app.log"
 PIN_SALT = "some_salt"  # Keep fixed for hashing
+
+# Configure logging
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("OMRTestManager")
 
 
 # ========================== DATABASE ==========================
@@ -130,7 +144,7 @@ class SettingsManager:
         with open(self.config_file, 'w') as f:
             json.dump(self.data, f, indent=4)
 
-    def get(self, key, default=None, raw=False):
+    def get(self, key, default=None, raw=False, base_only=False):
         if key in ["input_dir", "output_dir", "python_command", "templates_dir"]:
             platform_key = f"{key}_{sys.platform}"
             val = None
@@ -159,7 +173,7 @@ class SettingsManager:
                     base_dir = os.path.dirname(os.path.abspath(__file__))
                 val = os.path.abspath(os.path.join(base_dir, val))
                 
-            if not raw and key in ["input_dir", "output_dir"] and getattr(self, "current_test_id", None) is not None:
+            if not raw and not base_only and key in ["input_dir", "output_dir"] and getattr(self, "current_test_id", None) is not None:
                 val = os.path.join(val, str(self.current_test_id))
             return val
         return self.data.get(key, default)
@@ -167,9 +181,19 @@ class SettingsManager:
     def set(self, key, value):
         if key in ["input_dir", "output_dir", "python_command", "templates_dir"]:
             platform_key = f"{key}_{sys.platform}"
-            self.data[platform_key] = value
+            if value.strip() == "":
+                if platform_key in self.data:
+                    del self.data[platform_key]
+                if key in self.data:
+                    del self.data[key]
+            else:
+                self.data[platform_key] = value
         else:
-            self.data[key] = value
+            if key in ["firestore_auth_key", "firestore_collection", "pin_hash"] and value.strip() == "":
+                if key in self.data:
+                    del self.data[key]
+            else:
+                self.data[key] = value
         self.save()
 
     def verify_pin(self, pin):
@@ -204,19 +228,23 @@ class PDFProcessor:
     # -------------------------------------------------------
     def process_pdf(self, pdf_path, template_folder, progress_callback=None):
 
-        base_input_dir = self.settings.get("input_dir", raw=True)
-        base_output_dir = self.settings.get("output_dir", raw=True)
+        base_input_dir = self.settings.get("input_dir", base_only=True)
+        base_output_dir = self.settings.get("output_dir", base_only=True)
         templates_dir = self.settings.get("templates_dir")
 
-        # Validate base folders
-        if not os.path.exists(base_input_dir):
-            raise Exception("Base input directory does not exist. Check settings.")
+        # Ensure base folders exist, create them if they do not exist
+        if base_input_dir:
+            os.makedirs(base_input_dir, exist_ok=True)
+        else:
+            raise Exception("Base input directory path is empty. Check settings.")
 
-        if not os.path.exists(base_output_dir):
-            raise Exception("Base output directory does not exist. Check settings.")
+        if base_output_dir:
+            os.makedirs(base_output_dir, exist_ok=True)
+        else:
+            raise Exception("Base output directory path is empty. Check settings.")
 
-        if not os.path.exists(templates_dir):
-            raise Exception("Templates directory does not exist.")
+        if not templates_dir or not os.path.exists(templates_dir):
+            raise Exception(f"Templates directory '{templates_dir}' does not exist.")
 
         # Resolve actual folders and create them
         input_dir = self.settings.get("input_dir")
@@ -275,6 +303,8 @@ class PDFProcessor:
             page_count = len(doc)
 
             for i, page in enumerate(doc, start=1):
+                if progress_callback:
+                    progress_callback(f"Converting PDF to Images (Page {i}/{page_count})...")
                 pix = page.get_pixmap(matrix=matrix)
                 pix.save(os.path.join(input_dir, f"page_{i}.jpg"))
 
@@ -476,14 +506,18 @@ class FirestoreUploader:
 
         # Upload each row as a document
         batch = db.batch()
-        for i, row in enumerate(rows):
+        batch_size = 0
+        for row in rows:
             # Use auto-generated ID or use a field if available
             doc_ref = db.collection(collection).document()
             batch.set(doc_ref, row)
-            if i % 500 == 499:  # Firestore batch limit is 500
+            batch_size += 1
+            if batch_size == 500:  # Firestore batch limit is 500
                 batch.commit()
                 batch = db.batch()
-        batch.commit()
+                batch_size = 0
+        if batch_size > 0:
+            batch.commit()
 
         if progress_callback:
             progress_callback(f"Uploaded {len(rows)} rows to Firestore collection '{collection}'.")
@@ -557,9 +591,12 @@ class TestManagerApp:
         # CRUD buttons
         crud_frame = Frame(left_frame)
         crud_frame.pack(fill=X, pady=5)
-        Button(crud_frame, text="Add Test", command=self.add_test_dialog).pack(side=LEFT, padx=2)
-        Button(crud_frame, text="Edit", command=self.edit_test_dialog).pack(side=LEFT, padx=2)
-        Button(crud_frame, text="Delete", command=self.delete_test).pack(side=LEFT, padx=2)
+        self.btn_add = Button(crud_frame, text="Add Test", command=self.add_test_dialog)
+        self.btn_add.pack(side=LEFT, padx=2)
+        self.btn_edit = Button(crud_frame, text="Edit", command=self.edit_test_dialog)
+        self.btn_edit.pack(side=LEFT, padx=2)
+        self.btn_delete = Button(crud_frame, text="Delete", command=self.delete_test)
+        self.btn_delete.pack(side=LEFT, padx=2)
 
         # Test list (Treeview)
         self.tree = ttk.Treeview(left_frame, columns=("ID", "Name", "Date", "Template"), show="headings", height=20)
@@ -620,6 +657,17 @@ class TestManagerApp:
         self.current_test_id = None
         self.current_test_data = None
 
+    def set_ui_state(self, enabled=True):
+        self.processing_in_progress = not enabled
+        state = NORMAL if enabled else DISABLED
+        self.btn_input_pdf.config(state=state if self.current_test_id else DISABLED)
+        self.btn_run.config(state=state if self.current_test_id else DISABLED)
+        self.btn_push.config(state=state if self.current_test_id else DISABLED)
+        self.btn_add.config(state=state)
+        self.btn_edit.config(state=state)
+        self.btn_delete.config(state=state)
+        self.tree.configure(selectmode="extended" if enabled else "none")
+
     # ---------- TEST LIST OPERATIONS ----------
     def refresh_test_list(self):
         for item in self.tree.get_children():
@@ -629,6 +677,8 @@ class TestManagerApp:
             self.tree.insert("", END, values=test)
 
     def on_test_select(self, event):
+        if getattr(self, "processing_in_progress", False):
+            return
         selection = self.tree.selection()
         if selection:
             item = self.tree.item(selection[0])
@@ -748,8 +798,25 @@ class TestManagerApp:
         if not self.current_test_id:
             messagebox.showwarning("No selection", "Please select a test to delete.")
             return
-        if messagebox.askyesno("Delete", "Are you sure you want to delete this test?"):
+        if messagebox.askyesno("Delete", "Are you sure you want to delete this test? This will also permanently delete all scan images and output CSVs associated with this test."):
+            # Resolve the folders while current_test_id is still set
+            input_dir = self.settings.get("input_dir")
+            output_dir = self.settings.get("output_dir")
+            
+            # Delete database entry
             self.db.delete_test(self.current_test_id)
+            
+            # Delete filesystem folders only if they are specific test subfolders
+            for folder in [input_dir, output_dir]:
+                if folder and os.path.exists(folder):
+                    last_part = os.path.basename(folder)
+                    if last_part.isdigit() and int(last_part) == self.current_test_id:
+                        try:
+                            shutil.rmtree(folder)
+                        except Exception as e:
+                            import traceback
+                            logger.error(f"Failed to delete directory {folder}:\n{traceback.format_exc()}")
+            
             self.refresh_test_list()
             self.on_test_select(None)  # clear selection
 
@@ -765,42 +832,37 @@ class TestManagerApp:
         if not pdf_path:
             return
 
-        # Show page count
-        try:
-            page_count = self.processor.get_page_count(pdf_path)
-            answer = messagebox.askyesno(
-                "PDF Info",
-                f"PDF has {page_count} pages.\nProceed with processing? This will clear input/output folders."
-            )
-            if not answer:
-                return
-        except Exception as e:
-            messagebox.showerror("Error", f"Cannot read PDF: {e}")
+        # Confirm before counting pages to keep the UI responsive
+        if not messagebox.askyesno("Confirm Process", "Proceed with processing the scanned PDF? This will clear the input and output folders for this test."):
             return
 
         # Process in background
-        self.status_var.set("Processing PDF...")
-        self.btn_input_pdf.config(state=DISABLED)
-        self.btn_run.config(state=DISABLED)
-        self.btn_push.config(state=DISABLED)
+        self.status_var.set("Initializing PDF processing...")
+        self.set_ui_state(False)
 
         def process():
             try:
                 template = self.current_test_data["template"]
+                
+                # Run page count in background
+                self.root.after(0, lambda: self.status_var.set("Reading PDF page count..."))
+                page_count = self.processor.get_page_count(pdf_path)
+                
+                self.root.after(0, lambda: self.status_var.set(f"Converting {page_count} PDF pages..."))
+                
                 def progress(msg):
                     self.root.after(0, lambda: self.status_var.set(msg))
                 self.processor.process_pdf(pdf_path, template, progress_callback=progress)
-                self.root.after(0, lambda: messagebox.showinfo("Success", "PDF processed and template copied."))
+                
+                self.root.after(0, lambda: messagebox.showinfo("Success", f"PDF processed ({page_count} pages) and template copied."))
                 self.root.after(0, lambda: self.status_var.set("Ready"))
-                self.root.after(0, lambda: self.btn_input_pdf.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_run.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_push.config(state=NORMAL))
+                self.root.after(0, lambda: self.set_ui_state(True))
             except Exception as e:
+                import traceback
+                logger.error(f"Error during PDF processing:\n{traceback.format_exc()}")
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
                 self.root.after(0, lambda: self.status_var.set("Error"))
-                self.root.after(0, lambda: self.btn_input_pdf.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_run.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_push.config(state=NORMAL))
+                self.root.after(0, lambda: self.set_ui_state(True))
 
         threading.Thread(target=process, daemon=True).start()
 
@@ -850,9 +912,7 @@ class TestManagerApp:
             return
 
         self.status_var.set("Running command...")
-        self.btn_run.config(state=DISABLED)
-        self.btn_input_pdf.config(state=DISABLED)
-        self.btn_push.config(state=DISABLED)
+        self.set_ui_state(False)
 
         def run():
             try:
@@ -862,15 +922,13 @@ class TestManagerApp:
                 self.root.after(0, lambda: messagebox.showinfo("Success", "Command executed successfully."))
                 self.root.after(0, self.display_latest_csv)
                 self.root.after(0, lambda: self.status_var.set("Ready"))
-                self.root.after(0, lambda: self.btn_run.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_input_pdf.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_push.config(state=NORMAL))
+                self.root.after(0, lambda: self.set_ui_state(True))
             except Exception as e:
+                import traceback
+                logger.error(f"Error during OMR execution:\n{traceback.format_exc()}")
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
                 self.root.after(0, lambda: self.status_var.set("Error"))
-                self.root.after(0, lambda: self.btn_run.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_input_pdf.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_push.config(state=NORMAL))
+                self.root.after(0, lambda: self.set_ui_state(True))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -950,7 +1008,7 @@ class TestManagerApp:
             return
 
         self.status_var.set("Pushing to Firestore...")
-        self.btn_push.config(state=DISABLED)
+        self.set_ui_state(False)
 
         def upload():
             try:
@@ -960,11 +1018,13 @@ class TestManagerApp:
                 uploader.upload_csv(csv_path, progress_callback=progress)
                 self.root.after(0, lambda: messagebox.showinfo("Success", "Data pushed to Firestore."))
                 self.root.after(0, lambda: self.status_var.set("Ready"))
-                self.root.after(0, lambda: self.btn_push.config(state=NORMAL))
+                self.root.after(0, lambda: self.set_ui_state(True))
             except Exception as e:
+                import traceback
+                logger.error(f"Error during Firestore sync:\n{traceback.format_exc()}")
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
                 self.root.after(0, lambda: self.status_var.set("Error"))
-                self.root.after(0, lambda: self.btn_push.config(state=NORMAL))
+                self.root.after(0, lambda: self.set_ui_state(True))
 
         threading.Thread(target=upload, daemon=True).start()
 
@@ -977,11 +1037,17 @@ class TestManagerApp:
         settings_win.grab_set()
 
         # Variables
-        input_dir_var = StringVar(value=self.settings.get("input_dir", raw=True))
-        output_dir_var = StringVar(value=self.settings.get("output_dir", raw=True))
-        python_cmd_var = StringVar(value=self.settings.get("python_command", raw=True))
-        templates_dir_var = StringVar(value=self.settings.get("templates_dir", raw=True))
-        firestore_key_var = StringVar(value=self.settings.get("firestore_auth_key", raw=True))
+        raw_input = self.settings.get("input_dir", raw=True)
+        raw_output = self.settings.get("output_dir", raw=True)
+        raw_python = self.settings.get("python_command", raw=True)
+        raw_templates = self.settings.get("templates_dir", raw=True)
+        raw_firestore_key = self.settings.get("firestore_auth_key", raw=True)
+
+        input_dir_var = StringVar(value=raw_input if raw_input else self.settings.get("input_dir", base_only=True))
+        output_dir_var = StringVar(value=raw_output if raw_output else self.settings.get("output_dir", base_only=True))
+        python_cmd_var = StringVar(value=raw_python if raw_python else self.settings.get("python_command"))
+        templates_dir_var = StringVar(value=raw_templates if raw_templates else self.settings.get("templates_dir"))
+        firestore_key_var = StringVar(value=raw_firestore_key if raw_firestore_key else self.settings.get("firestore_auth_key"))
         collection_var = StringVar(value=self.settings.get("firestore_collection", "test_results"))
 
         def browse_dir(var):

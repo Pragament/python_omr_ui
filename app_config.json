@@ -7,7 +7,11 @@
     "output_dir_darwin": "outputs",
     "python_command_darwin": "python3 ../OMRChecker-master/main.py --inputDir {input} --outputDir {output}",
     "templates_dir_darwin": "samples",
-    "firestore_auth_key": "",
     "firestore_collection": "test_results",
-    "pin_hash": "b793b8a2a836ace068aa00d005f04f590e0abd13961f41d26ec52376e0eb7ea1"
+    "pin_hash": "b793b8a2a836ace068aa00d005f04f590e0abd13961f41d26ec52376e0eb7ea1",
+    "input_dir_win32": "C:\\Users\\srini\\python_omr_ui\\inputs",
+    "output_dir_win32": "C:\\Users\\srini\\python_omr_ui\\ouputs",
+    "python_command_win32": "OMRChecker",
+    "templates_dir_win32": "C:\\python_omr_ui\\samples",
+    "api_key": "lauzd9aiqoAHyvgSRi7q5td3tvAusvvjNXZJHoN9aLs"
 }

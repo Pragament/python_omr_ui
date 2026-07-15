@@ -64,6 +64,9 @@ def open_template_with_defaults(template_path):
 
 def open_evaluation_with_validation(evaluation_path):
     user_evaluation_config = load_json(evaluation_path)
+    if "marking_scheme" in user_evaluation_config and "marking_schemes" not in user_evaluation_config:
+        user_evaluation_config["marking_schemes"] = user_evaluation_config["marking_scheme"]
+        del user_evaluation_config["marking_scheme"]
     validate_evaluation_json(user_evaluation_config, evaluation_path)
     return user_evaluation_config
 
