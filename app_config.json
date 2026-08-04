@@ -4,5 +4,6 @@
     "python_command": "\"C:\\Users\\sriha\\AppData\\Local\\Programs\\Python\\Python313\\python.exe\" main.py --inputDir {input} --outputDir {output}",
     "templates_dir": "C:\\Users\\sriha\\Downloads\\templates",
     "api_base_url": "http://localhost:5000/api",
-    "pin_hash": "b793b8a2a836ace068aa00d005f04f590e0abd13961f41d26ec52376e0eb7ea1"
+    "pin_hash": "b793b8a2a836ace068aa00d005f04f590e0abd13961f41d26ec52376e0eb7ea1",
+    "last_google_email": "sreehasathota@gmail.com"
 }

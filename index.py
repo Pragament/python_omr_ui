@@ -41,18 +41,24 @@ except ImportError:
 # ========================== CONFIGURATION ==========================
 CONFIG_FILE = "app_config.json"
 DB_FILE = "tests.db"
-PIN_SALT = "some_salt"  # Keep fixed for hashing
 
 
-# ========================== EXPRESS API CLIENT (PostgreSQL Backend) ==========================
+# ========================== EXPRESS / STRAPI API CLIENT ==========================
 class ExpressAPIClient:
-    """Client for interacting with the Express.js REST JSON API backed by PostgreSQL."""
+    """Client for interacting with the Express.js / Strapi Users-Permissions REST JSON API."""
     def __init__(self, api_base_url="http://localhost:5000/api"):
         self.api_base_url = api_base_url.rstrip("/")
+        self.auth_token = None
+        self.current_user = None
+        self.user_schools = []
+        self.selected_school = None
 
     def _request(self, method, endpoint, data=None):
         url = f"{self.api_base_url}{endpoint}"
         headers = {"Content-Type": "application/json"}
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
+
         req_data = json.dumps(data).encode("utf-8") if data else None
 
         req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
@@ -64,44 +70,75 @@ class ExpressAPIClient:
             err_body = e.read().decode("utf-8")
             try:
                 err_json = json.loads(err_body)
-                raise Exception(err_json.get("error", f"HTTP Error {e.code}"))
-            except Exception:
+                if "error" in err_json:
+                    err_detail = err_json["error"].get("message") if isinstance(err_json["error"], dict) else err_json["error"]
+                    raise Exception(err_detail)
+                raise Exception(f"HTTP Error {e.code}")
+            except Exception as parse_err:
+                if str(parse_err) != f"HTTP Error {e.code}":
+                    raise parse_err
                 raise Exception(f"HTTP {e.code}: {e.reason}")
         except urllib.error.URLError as e:
-            raise Exception(f"Cannot connect to Express API at '{self.api_base_url}': {e.reason}")
+            raise Exception(f"Cannot connect to API at '{self.api_base_url}': {e.reason}")
         except Exception as e:
             raise Exception(f"API Error: {e}")
 
+    def authenticate_google_email(self, email, name="Google User"):
+        """Authenticate user with Google email via Strapi Users & Permissions Google Provider API."""
+        clean_email = email.strip().lower()
+        if not clean_email.endswith("@gmail.com") or len(clean_email) < 11:
+            raise Exception("Access denied. Only valid @gmail.com accounts are permitted for Google Login.")
+
+        payload = {
+            "email": clean_email,
+            "username": clean_email.split('@')[0],
+            "provider": "google"
+        }
+        res = self._request("POST", "/auth/google", payload)
+        if "jwt" in res and "user" in res:
+            self.auth_token = res.get("jwt")
+            self.current_user = res.get("user")
+            self.user_schools = self.current_user.get("schools", [])
+            if self.user_schools:
+                self.selected_school = self.user_schools[0]
+            return True, res
+        elif res.get("success"):
+            self.auth_token = res.get("token")
+            self.current_user = res.get("user")
+            self.user_schools = res.get("schools", [])
+            if self.user_schools:
+                self.selected_school = self.user_schools[0]
+            return True, res
+        error_msg = res.get("error", {}).get("message") if isinstance(res.get("error"), dict) else res.get("error", "Authentication failed.")
+        return False, error_msg
+
     def check_health(self):
-        """Check if Express API and PostgreSQL database are online."""
+        """Check API & Database status."""
         try:
             res = self._request("GET", "/health")
             return res.get("status") == "online", res
         except Exception as e:
             return False, str(e)
 
-    def get_all_tests(self):
-        """Fetch all tests from PostgreSQL database via Express API."""
-        res = self._request("GET", "/tests")
+    def get_tests_for_school(self, school_id=None):
+        """Fetch tests scoped by selected school ID."""
+        s_id = school_id or (self.selected_school["id"] if self.selected_school else 1)
+        res = self._request("GET", f"/schools/{s_id}/tests")
         return res.get("data", [])
 
-    def get_test(self, test_id):
-        """Fetch single test details from PostgreSQL database."""
-        res = self._request("GET", f"/tests/{test_id}")
-        return res.get("data")
-
-    def create_test(self, name, date, template_folder):
-        """Create a new test record in PostgreSQL database via Express API."""
+    def create_test_for_school(self, name, date, template_folder, school_id=None):
+        """Create test scoped to selected school."""
+        s_id = school_id or (self.selected_school["id"] if self.selected_school else 1)
         payload = {
             "name": name,
             "date": date,
             "template_folder": template_folder
         }
-        res = self._request("POST", "/tests", payload)
+        res = self._request("POST", f"/schools/{s_id}/tests", payload)
         return res.get("data")
 
     def update_test(self, test_id, name, date, template_folder):
-        """Update a test record in PostgreSQL database via Express API."""
+        """Update test record."""
         payload = {
             "name": name,
             "date": date,
@@ -111,12 +148,12 @@ class ExpressAPIClient:
         return res.get("data")
 
     def delete_test(self, test_id):
-        """Delete a test from PostgreSQL database via Express API."""
+        """Delete test record."""
         res = self._request("DELETE", f"/tests/{test_id}")
         return res.get("success", False)
 
-    def upload_csv(self, csv_path, test_id=None, test_name=None, progress_callback=None):
-        """Upload OMR CSV results to PostgreSQL database via Express API."""
+    def upload_csv_for_school(self, csv_path, test_id=None, test_name=None, school_id=None, progress_callback=None):
+        """Upload OMR CSV score rows scoped to selected school."""
         if not os.path.exists(csv_path):
             raise Exception(f"CSV file not found at '{csv_path}'")
 
@@ -129,7 +166,8 @@ class ExpressAPIClient:
         if not rows:
             raise Exception("CSV file is empty or invalid.")
 
-        endpoint = f"/tests/{test_id}/results" if test_id else "/results"
+        s_id = school_id or (self.selected_school["id"] if self.selected_school else 1)
+        endpoint = f"/schools/{s_id}/tests/{test_id}/results" if test_id else f"/schools/{s_id}/results"
         payload = {
             "test_id": test_id,
             "test_name": test_name or "OMR Test",
@@ -137,18 +175,19 @@ class ExpressAPIClient:
         }
 
         if progress_callback:
-            progress_callback(f"Pushing {len(rows)} CSV rows to Express API (PostgreSQL DB)...")
+            progress_callback(f"Pushing {len(rows)} CSV rows to database for School ID {s_id}...")
 
         res = self._request("POST", endpoint, payload)
 
         if progress_callback:
-            progress_callback(f"Successfully uploaded {len(rows)} rows to PostgreSQL database!")
+            progress_callback(f"Successfully uploaded {len(rows)} rows to database for School ID {s_id}!")
 
         return res
 
-    def get_test_results(self, test_id=None):
-        """Fetch OMR results for a test from PostgreSQL database via Express API."""
-        endpoint = f"/tests/{test_id}/results" if test_id else "/results"
+    def get_test_results_for_school(self, test_id=None, school_id=None):
+        """Fetch OMR student score rows for selected school & test."""
+        s_id = school_id or (self.selected_school["id"] if self.selected_school else 1)
+        endpoint = f"/schools/{s_id}/tests/{test_id}/results" if test_id else f"/schools/{s_id}/results"
         res = self._request("GET", endpoint)
         return res.get("data", [])
 
@@ -222,9 +261,6 @@ class Database:
         conn.commit()
         conn.close()
 
-    def close(self):
-        pass
-
 
 # ========================== SETTINGS ==========================
 class SettingsManager:
@@ -238,20 +274,15 @@ class SettingsManager:
             "python_command": default_py_cmd,
             "templates_dir": default_templates,
             "api_base_url": "http://localhost:5000/api",
-            "pin_hash": self._hash_pin("123456")  # default PIN: 123456
+            "last_google_email": "sreehasathota@gmail.com"
         }
         self.data = self._load()
-
-    def _hash_pin(self, pin):
-        return hashlib.sha256((pin + PIN_SALT).encode()).hexdigest()
 
     def _load(self):
         if os.path.exists(self.config_file):
             with open(self.config_file, 'r') as f:
                 try:
                     data = json.load(f)
-                    if "firestore_auth_key" in data and "api_base_url" not in data:
-                        data["api_base_url"] = self.defaults["api_base_url"]
                     if not data.get("templates_dir") or not os.path.exists(data.get("templates_dir")):
                         data["templates_dir"] = self.defaults["templates_dir"]
                     return data
@@ -271,24 +302,11 @@ class SettingsManager:
         self.data[key] = value
         self.save()
 
-    def verify_pin(self, pin):
-        if pin == "123456":
-            return True
-        return self._hash_pin(pin) == self.data.get("pin_hash")
 
-    def change_pin(self, old_pin, new_pin):
-        if not self.verify_pin(old_pin):
-            return False
-        self.data["pin_hash"] = self._hash_pin(new_pin)
-        self.save()
-        return True
-
-
-# ========================== PDF PROCESSOR (PyMuPDF / pypdf / pdf2image) ==========================
+# ========================== PDF PROCESSOR ==========================
 class PDFProcessor:
     def __init__(self, settings):
         self.settings = settings
-        self.poppler_path = r"C:\Users\HP\Downloads\Release-26.02.0-0\poppler-26.02.0\Library\bin"
 
     def get_page_count(self, pdf_path):
         if fitz is not None:
@@ -314,17 +332,7 @@ class PDFProcessor:
             except Exception:
                 pass
 
-        if pdfinfo_from_path is not None:
-            try:
-                kwargs = {}
-                if os.path.exists(self.poppler_path):
-                    kwargs["poppler_path"] = self.poppler_path
-                info = pdfinfo_from_path(pdf_path, **kwargs)
-                return info["Pages"]
-            except Exception as e:
-                raise Exception(f"Unable to read PDF.\n\n{e}")
-
-        raise Exception("No PDF reader library available. Please install PyMuPDF or pypdf.")
+        raise Exception("No PDF reader library available.")
 
     def process_pdf(self, pdf_path, template_folder, progress_callback=None):
         input_dir = self.settings.get("input_dir")
@@ -356,13 +364,11 @@ class PDFProcessor:
                         shutil.rmtree(path)
                 except Exception as e:
                     print(f"Error clearing {path}: {e}")
-                    continue
 
         if progress_callback:
             progress_callback("Converting PDF to Images...")
 
         page_count = 0
-
         if fitz is not None:
             try:
                 doc = fitz.open(pdf_path)
@@ -372,26 +378,13 @@ class PDFProcessor:
                     pix.save(os.path.join(input_dir, f"page_{i}.jpg"))
                 doc.close()
             except Exception as e:
-                print("PyMuPDF conversion fallback:", e)
-                page_count = 0
-
-        if page_count == 0 and convert_from_path is not None:
-            kwargs = {}
-            if os.path.exists(self.poppler_path):
-                kwargs["poppler_path"] = self.poppler_path
-            images = convert_from_path(pdf_path, dpi=300, **kwargs)
-            page_count = len(images)
-            for i, image in enumerate(images, start=1):
-                image.save(os.path.join(input_dir, f"page_{i}.jpg"), "JPEG")
+                print("PyMuPDF fallback:", e)
 
         if page_count == 0:
             raise Exception("Failed to convert PDF pages to images.")
 
         if progress_callback:
-            progress_callback(f"{page_count} pages converted to images.")
-
-        if progress_callback:
-            progress_callback("Copying Template...")
+            progress_callback(f"{page_count} pages converted to images. Copying Template...")
 
         for item in os.listdir(template_source):
             src = os.path.join(template_source, item)
@@ -400,9 +393,6 @@ class PDFProcessor:
                 shutil.copytree(src, dst, dirs_exist_ok=True)
             else:
                 shutil.copy2(src, dst)
-
-        if progress_callback:
-            progress_callback("Template copied successfully.")
 
         return page_count
 
@@ -417,7 +407,6 @@ class PDFProcessor:
             parts = cmd.split(" ", 1)
             cmd = f"{py_exec} {parts[1]}"
         elif not cmd.startswith('"'):
-            # If not quoted, ensure python executable path is used
             cmd = f"{py_exec} {cmd}"
 
         cmd = (
@@ -429,33 +418,23 @@ class PDFProcessor:
         if progress_callback:
             progress_callback(f"Running command:\n{cmd}")
 
-        try:
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            time.sleep(1)
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        time.sleep(1)
 
-            if progress_callback:
-                progress_callback(result.stdout + "\n" + result.stderr)
+        if result.returncode != 0:
+            raise Exception(result.stderr or "Script exited with non-zero status code.")
 
-            if result.returncode != 0:
-                raise Exception(result.stderr or "Script exited with non-zero status code.")
-
-            if progress_callback:
-                progress_callback("OMR processing completed successfully.")
-
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            raise Exception("OMR process timed out.")
+        return result.stdout
 
     def get_csv_files(self, output_dir):
         if not os.path.exists(output_dir):
             return []
-
         csv_files = []
         dirs_to_check = [output_dir, os.path.join(output_dir, "Results")]
         for d in dirs_to_check:
@@ -463,7 +442,6 @@ class PDFProcessor:
                 for f in os.listdir(d):
                     if f.lower().endswith(".csv"):
                         csv_files.append(os.path.join(d, f))
-
         return csv_files
 
     def read_csv(self, csv_path):
@@ -479,46 +457,72 @@ class PDFProcessor:
 class TestManagerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("OMR Test Manager (PostgreSQL API Integrated)")
-        self.root.geometry("980x720")
+        self.root.title("OMR Test Manager")
+        self.root.geometry("1020x750")
 
         self.settings = SettingsManager()
         self.db = Database()
         self.processor = PDFProcessor(self.settings)
         self.api_client = ExpressAPIClient(self.settings.get("api_base_url"))
 
-        self.showing_db_tests = False
-        self.show_login()
+        self.showing_db_tests = True
+        self.show_google_login()
 
-    def show_login(self):
+    def show_google_login(self):
         self.login_frame = Frame(self.root)
         self.login_frame.pack(expand=True)
 
-        Label(self.login_frame, text="OMR Test Manager", font=('Arial', 18, 'bold')).pack(pady=10)
-        Label(self.login_frame, text="Enter 6-digit PIN", font=('Arial', 14)).pack(pady=10)
+        Label(self.login_frame, text="OMR Test Manager", font=('Arial', 22, 'bold')).pack(pady=15)
 
-        self.pin_entry = Entry(self.login_frame, show='*', font=('Arial', 20), width=10, justify='center')
-        self.pin_entry.pack(pady=10)
-        self.pin_entry.bind('<Return>', lambda e: self.check_pin())
+        Label(self.login_frame, text="ENTER YOUR GMAIL (@gmail.com):", font=('Arial', 12, 'bold')).pack(pady=12)
 
-        Button(self.login_frame, text="Login", command=self.check_pin, width=15, bg="#007bff", fg="white", font=('Arial', 11, 'bold')).pack(pady=15)
+        last_email = self.settings.get("last_google_email", "sreehasathota@gmail.com")
+        self.email_entry = Entry(self.login_frame, font=('Arial', 14), width=32, justify='center')
+        self.email_entry.insert(0, last_email)
+        self.email_entry.pack(pady=5)
+        self.email_entry.bind('<Return>', lambda e: self.perform_google_login())
 
-        self.pin_error = Label(self.login_frame, text="", fg="red")
-        self.pin_error.pack()
+        Button(
+            self.login_frame,
+            text="🌐 Sign In with Google Email",
+            command=self.perform_google_login,
+            width=28,
+            bg="#4285F4",
+            fg="white",
+            font=('Arial', 11, 'bold')
+        ).pack(pady=15)
 
-        self.pin_entry.focus()
+        self.login_status = Label(self.login_frame, text="", fg="red", font=('Arial', 10), wraplength=400)
+        self.login_status.pack(pady=5)
 
-    def check_pin(self):
-        pin = self.pin_entry.get()
-        if len(pin) != 6 or not pin.isdigit():
-            self.pin_error.config(text="PIN must be exactly 6 digits.")
+        self.email_entry.focus()
+
+    def perform_google_login(self):
+        email = self.email_entry.get().strip().lower()
+        if not email or not email.endswith("@gmail.com") or len(email) < 11:
+            self.login_status.config(
+                text="Access denied. Only valid @gmail.com email addresses are permitted for Google Login.",
+                fg="red"
+            )
             return
-        if self.settings.verify_pin(pin):
-            self.login_frame.destroy()
-            self.setup_main_ui()
-        else:
-            self.pin_error.config(text="Invalid PIN. Try again.")
-            self.pin_entry.delete(0, END)
+
+        self.login_status.config(text="Authenticating...", fg="blue")
+
+        def login_thread():
+            try:
+                success, res = self.api_client.authenticate_google_email(email)
+                if success:
+                    self.settings.set("last_google_email", email)
+                    def proceed():
+                        self.login_frame.destroy()
+                        self.setup_main_ui()
+                    self.root.after(0, proceed)
+                else:
+                    self.root.after(0, lambda: self.login_status.config(text=res.get("error", "Login failed"), fg="red"))
+            except Exception as e:
+                self.root.after(0, lambda: self.login_status.config(text=f"{e}", fg="red"))
+
+        threading.Thread(target=login_thread, daemon=True).start()
 
     def setup_main_ui(self):
         menubar = Menu(self.root)
@@ -526,30 +530,54 @@ class TestManagerApp:
 
         settings_menu = Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Settings", menu=settings_menu)
-        settings_menu.add_command(label="Preferences (API & Directories)", command=self.open_settings)
+        settings_menu.add_command(label="Preferences & API URL", command=self.open_settings)
         settings_menu.add_separator()
-        settings_menu.add_command(label="Change PIN", command=self.change_pin_dialog)
+        settings_menu.add_command(label="Switch Google User / Logout", command=self.logout)
         settings_menu.add_separator()
         settings_menu.add_command(label="Exit", command=self.root.quit)
 
         db_menu = Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="PostgreSQL DB", menu=db_menu)
-        db_menu.add_command(label="Check API & DB Connection Status", command=self.check_api_status)
-        db_menu.add_command(label="Fetch Tests from Database", command=self.show_db_tests)
-        db_menu.add_command(label="Show Local SQLite Tests", command=self.show_local_tests)
+        menubar.add_cascade(label="Database & Schools", menu=db_menu)
+        db_menu.add_command(label="Check API & Database Health", command=self.check_api_status)
+        db_menu.add_command(label="Refresh Assigned Schools", command=self.refresh_assigned_schools)
 
+        # Top Bar for Multi-School Selection Dropdown & Logged-in User Profile
+        top_bar = Frame(self.root, bg="#e9ecef", padx=10, pady=8)
+        top_bar.pack(fill=X)
+
+        role_info = self.api_client.current_user.get("role", {})
+        role_name = role_info.get("name", "test_editor") if isinstance(role_info, dict) else str(role_info)
+        user_name = self.api_client.current_user.get("username", self.api_client.current_user.get("email", "User")) if self.api_client.current_user else "User"
+        user_email = self.api_client.current_user.get("email", "") if self.api_client.current_user else ""
+        Label(top_bar, text=f"👤 Logged in: {user_name} ({user_email}) | Role: {role_name}", font=('Arial', 10, 'bold'), bg="#e9ecef").pack(side=LEFT)
+
+        school_frame = Frame(top_bar, bg="#e9ecef")
+        school_frame.pack(side=RIGHT)
+
+        Label(school_frame, text="🏫 Select School:", font=('Arial', 10, 'bold'), bg="#e9ecef").pack(side=LEFT, padx=5)
+
+        school_names = [f"{s['name']} ({s['code']})" for s in self.api_client.user_schools]
+        self.school_combo = ttk.Combobox(school_frame, values=school_names, width=34, state="readonly")
+        self.school_combo.pack(side=LEFT, padx=5)
+
+        if school_names:
+            self.school_combo.set(school_names[0])
+
+        self.school_combo.bind("<<ComboboxSelected>>", self.on_school_changed)
+
+        # Main Paned View
         main_paned = PanedWindow(self.root, orient=HORIZONTAL)
         main_paned.pack(fill=BOTH, expand=True, padx=8, pady=8)
 
         left_frame = Frame(main_paned)
-        main_paned.add(left_frame, width=420)
+        main_paned.add(left_frame, width=440)
 
         title_frame = Frame(left_frame)
         title_frame.pack(fill=X, pady=5)
-        self.list_title_label = Label(title_frame, text="Tests (Local SQLite)", font=('Arial', 13, 'bold'))
+        self.list_title_label = Label(title_frame, text="Tests (Selected School DB)", font=('Arial', 12, 'bold'))
         self.list_title_label.pack(side=LEFT)
 
-        self.btn_toggle_source = Button(title_frame, text="Switch to DB Tests 🌐", command=self.toggle_test_source, bg="#6c757d", fg="white")
+        self.btn_toggle_source = Button(title_frame, text="Switch to Local Tests 💻", command=self.toggle_test_source, bg="#6c757d", fg="white")
         self.btn_toggle_source.pack(side=RIGHT)
 
         crud_frame = Frame(left_frame)
@@ -565,7 +593,7 @@ class TestManagerApp:
         self.tree.heading("Date", text="Date")
         self.tree.heading("Template", text="Template")
         self.tree.column("ID", width=40)
-        self.tree.column("Name", width=160)
+        self.tree.column("Name", width=170)
         self.tree.column("Date", width=90)
         self.tree.column("Template", width=110)
         self.tree.pack(fill=BOTH, expand=True, pady=5)
@@ -590,10 +618,10 @@ class TestManagerApp:
         self.btn_run = Button(action_frame, text="⚙️ Run OMR Command", command=self.run_command, state=DISABLED)
         self.btn_run.pack(side=LEFT, padx=3)
 
-        self.btn_push = Button(action_frame, text="☁️ Push Results to PostgreSQL (API)", command=self.push_to_postgresql, state=DISABLED, bg="#17a2b8", fg="white")
+        self.btn_push = Button(action_frame, text="☁️ Push Results to Selected School DB", command=self.push_to_postgresql, state=DISABLED, bg="#17a2b8", fg="white")
         self.btn_push.pack(side=LEFT, padx=3)
 
-        self.output_frame = LabelFrame(right_frame, text="CSV Output / PostgreSQL Database Results", padx=5, pady=5, font=('Arial', 10, 'bold'))
+        self.output_frame = LabelFrame(right_frame, text="CSV Output / Database Results", padx=5, pady=5, font=('Arial', 10, 'bold'))
         self.output_frame.pack(fill=BOTH, expand=True, pady=5)
 
         view_bar = Frame(self.output_frame)
@@ -605,7 +633,8 @@ class TestManagerApp:
         self.output_text.pack(fill=BOTH, expand=True)
 
         self.status_var = StringVar()
-        self.status_var.set("Ready | Express API: " + self.settings.get("api_base_url"))
+        school_name = self.api_client.selected_school["name"] if self.api_client.selected_school else "School"
+        self.status_var.set(f"Ready | Active School: {school_name} | API: {self.settings.get('api_base_url')}")
         self.status_bar = Label(self.root, textvariable=self.status_var, relief=SUNKEN, anchor=W, padx=5, pady=3)
         self.status_bar.pack(fill=X, side=BOTTOM)
 
@@ -613,6 +642,42 @@ class TestManagerApp:
 
         self.current_test_id = None
         self.current_test_data = None
+
+    def on_school_changed(self, event):
+        selected_idx = self.school_combo.current()
+        if selected_idx >= 0 and selected_idx < len(self.api_client.user_schools):
+            self.api_client.selected_school = self.api_client.user_schools[selected_idx]
+            school_name = self.api_client.selected_school["name"]
+            self.status_var.set(f"Switched active school to: {school_name}")
+            self.refresh_test_list()
+
+    def refresh_assigned_schools(self):
+        if not self.api_client.current_user:
+            return
+        email = self.api_client.current_user.get("email", "")
+        def fetch():
+            try:
+                schools = self.api_client.getUserSchools(email)
+                def update():
+                    self.api_client.user_schools = schools
+                    school_names = [f"{s['name']} ({s['code']})" for s in schools]
+                    self.school_combo['values'] = school_names
+                    if school_names:
+                        self.school_combo.set(school_names[0])
+                        self.api_client.selected_school = schools[0]
+                    self.refresh_test_list()
+                    messagebox.showinfo("Refreshed", f"Loaded {len(schools)} assigned schools.")
+                self.root.after(0, update)
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def logout(self):
+        self.root.destroy()
+        new_root = Tk()
+        app = TestManagerApp(new_root)
+        new_root.mainloop()
 
     def toggle_test_source(self):
         if self.showing_db_tests:
@@ -627,10 +692,31 @@ class TestManagerApp:
         self.refresh_test_list()
 
     def show_db_tests(self):
-        self.status_var.set("Fetching tests from PostgreSQL database via Express API...")
+        self.showing_db_tests = True
+        school_name = self.api_client.selected_school["name"] if self.api_client.selected_school else "School"
+        self.list_title_label.config(text=f"Tests ({school_name} DB)")
+        self.btn_toggle_source.config(text="Switch to Local Tests 💻", bg="#007bff")
+        self.refresh_test_list()
+
+    def refresh_test_list(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        if not self.showing_db_tests:
+            tests = self.db.get_all_tests()
+            for test in tests:
+                self.tree.insert("", END, values=test)
+            self.status_var.set(f"Loaded {len(tests)} local tests.")
+            return
+
+        school_id = self.api_client.selected_school["id"] if self.api_client.selected_school else 1
+        school_name = self.api_client.selected_school["name"] if self.api_client.selected_school else "School"
+
+        self.status_var.set(f"Fetching tests for '{school_name}' from database...")
+
         def fetch():
             try:
-                db_tests = self.api_client.get_all_tests()
+                db_tests = self.api_client.get_tests_for_school(school_id)
                 def update():
                     for item in self.tree.get_children():
                         self.tree.delete(item)
@@ -641,28 +727,12 @@ class TestManagerApp:
                             test.get("date"),
                             test.get("template_folder")
                         ))
-                    self.showing_db_tests = True
-                    self.list_title_label.config(text="Tests (PostgreSQL DB)")
-                    self.btn_toggle_source.config(text="Switch to Local Tests 💻", bg="#007bff")
-                    self.status_var.set(f"Loaded {len(db_tests)} tests from PostgreSQL DB.")
+                    self.status_var.set(f"Loaded {len(db_tests)} tests for {school_name}.")
                 self.root.after(0, update)
             except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("API Error", f"Failed to fetch tests from database:\n{e}"))
-                self.root.after(0, lambda: self.status_var.set("Error connecting to Express API"))
+                self.root.after(0, lambda: messagebox.showerror("API Error", f"Failed to fetch tests:\n{e}"))
 
         threading.Thread(target=fetch, daemon=True).start()
-
-    def refresh_test_list(self):
-        if self.showing_db_tests:
-            self.show_db_tests()
-            return
-
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        tests = self.db.get_all_tests()
-        for test in tests:
-            self.tree.insert("", END, values=test)
-        self.status_var.set(f"Loaded {len(tests)} local tests.")
 
     def on_test_select(self, event):
         selection = self.tree.selection()
@@ -677,7 +747,8 @@ class TestManagerApp:
                     "date": values[2],
                     "template": values[3]
                 }
-                source = "PostgreSQL DB" if self.showing_db_tests else "Local SQLite"
+                school_name = self.api_client.selected_school["name"] if self.api_client.selected_school else "School"
+                source = f"PostgreSQL DB ({school_name})" if self.showing_db_tests else "Local SQLite"
                 self.test_info_label.config(text=f"Selected Test: {values[1]} | Date: {values[2]} | Template: {values[3]} ({source})")
                 self.btn_input_pdf.config(state=NORMAL)
                 self.btn_run.config(state=NORMAL)
@@ -699,18 +770,13 @@ class TestManagerApp:
         if not self.current_test_id:
             messagebox.showwarning("No selection", "Please select a test to edit.")
             return
-        if self.showing_db_tests:
-            test = (
-                self.current_test_data["id"],
-                self.current_test_data["name"],
-                self.current_test_data["date"],
-                self.current_test_data["template"]
-            )
-            self._open_test_dialog("Edit Test (DB)", test)
-        else:
-            test = self.db.get_test(self.current_test_id)
-            if test:
-                self._open_test_dialog("Edit Test", test)
+        test = (
+            self.current_test_data["id"],
+            self.current_test_data["name"],
+            self.current_test_data["date"],
+            self.current_test_data["template"]
+        )
+        self._open_test_dialog("Edit Test", test)
 
     def _open_test_dialog(self, title, test_data):
         dialog = Toplevel(self.root)
@@ -722,8 +788,7 @@ class TestManagerApp:
         templates_dir = self.settings.get("templates_dir")
         possible_dirs = [
             templates_dir,
-            os.path.join(os.path.expanduser("~"), "Downloads", "templates"),
-            os.path.join(os.path.expanduser("~"), "Downloads", "omr_template_data")
+            os.path.join(os.path.expanduser("~"), "Downloads", "templates")
         ]
 
         template_options = []
@@ -753,7 +818,6 @@ class TestManagerApp:
         Entry(dialog, textvariable=date_var, width=30).grid(row=1, column=1, padx=10, pady=8)
 
         Label(dialog, text="Template Folder:").grid(row=2, column=0, sticky=W, padx=10, pady=8)
-
         template_combo = ttk.Combobox(dialog, textvariable=template_var, values=template_options, width=28)
         template_combo.grid(row=2, column=1, padx=10, pady=8)
 
@@ -770,8 +834,6 @@ class TestManagerApp:
                     template_combo['values'] = subdirs
                     template_combo.set(subdirs[0])
                     self.settings.set("templates_dir", chosen)
-                else:
-                    template_combo.set(os.path.basename(chosen))
 
         Button(dialog, text="📁 Browse Dir", command=browse_template_dir).grid(row=2, column=2, padx=5)
 
@@ -784,32 +846,22 @@ class TestManagerApp:
                 messagebox.showerror("Error", "All fields are required.")
                 return
 
-            try:
-                datetime.strptime(date, "%Y-%m-%d")
-            except ValueError:
-                messagebox.showerror("Error", "Date must be in YYYY-MM-DD format.")
-                return
-
             def push_and_save():
                 try:
                     if test_data:
                         test_id = test_data[0]
                         if not self.showing_db_tests:
                             self.db.update_test(test_id, name, date, template)
-                        try:
-                            self.api_client.update_test(test_id, name, date, template)
-                        except Exception as api_err:
-                            print("API Sync warning on update:", api_err)
+                        self.api_client.update_test(test_id, name, date, template)
                     else:
-                        new_id = self.db.insert_test(name, date, template)
-                        try:
-                            self.api_client.create_test(name, date, template)
-                        except Exception as api_err:
-                            print("API Sync warning on insert:", api_err)
+                        if not self.showing_db_tests:
+                            self.db.insert_test(name, date, template)
+                        self.api_client.create_test_for_school(name, date, template)
 
                     self.root.after(0, lambda: self.refresh_test_list())
                     self.root.after(0, lambda: dialog.destroy())
-                    self.root.after(0, lambda: messagebox.showinfo("Success", f"Test '{name}' saved & synchronized with PostgreSQL DB."))
+                    school_name = self.api_client.selected_school["name"] if self.api_client.selected_school else "School"
+                    self.root.after(0, lambda: messagebox.showinfo("Success", f"Test '{name}' saved for {school_name}."))
                 except Exception as e:
                     self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
 
@@ -826,20 +878,12 @@ class TestManagerApp:
             test_id = self.current_test_id
             def delete():
                 try:
-                    if self.showing_db_tests:
-                        self.api_client.delete_test(test_id)
-                    else:
-                        self.db.delete_test(test_id)
-                        try:
-                            self.api_client.delete_test(test_id)
-                        except Exception as e:
-                            print("API delete warning:", e)
-
+                    self.api_client.delete_test(test_id)
                     self.root.after(0, lambda: self.refresh_test_list())
                     self.root.after(0, lambda: self.on_test_select(None))
-                    self.root.after(0, lambda: messagebox.showinfo("Deleted", f"Test {test_id} deleted successfully."))
+                    self.root.after(0, lambda: messagebox.showinfo("Deleted", f"Test {test_id} deleted."))
                 except Exception as e:
-                    self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to delete test: {e}"))
+                    self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
 
             threading.Thread(target=delete, daemon=True).start()
 
@@ -855,21 +899,13 @@ class TestManagerApp:
 
         try:
             page_count = self.processor.get_page_count(pdf_path)
-            answer = messagebox.askyesno(
-                "PDF Info",
-                f"Selected PDF has {page_count} page(s).\n\nProceed with processing? This will clear input/output folders."
-            )
-            if not answer:
+            if not messagebox.askyesno("PDF Info", f"Selected PDF has {page_count} page(s).\n\nProceed with processing?"):
                 return
         except Exception as e:
             messagebox.showerror("Error", f"Cannot read PDF: {e}")
             return
 
         self.status_var.set("Processing PDF...")
-        self.btn_input_pdf.config(state=DISABLED)
-        self.btn_run.config(state=DISABLED)
-        self.btn_push.config(state=DISABLED)
-
         def process():
             try:
                 template = self.current_test_data["template"]
@@ -878,15 +914,9 @@ class TestManagerApp:
                 self.processor.process_pdf(pdf_path, template, progress_callback=progress)
                 self.root.after(0, lambda: messagebox.showinfo("Success", "PDF pages converted & template files copied."))
                 self.root.after(0, lambda: self.status_var.set("Ready"))
-                self.root.after(0, lambda: self.btn_input_pdf.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_run.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_push.config(state=NORMAL))
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
                 self.root.after(0, lambda: self.status_var.set("Error"))
-                self.root.after(0, lambda: self.btn_input_pdf.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_run.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_push.config(state=NORMAL))
 
         threading.Thread(target=process, daemon=True).start()
 
@@ -897,8 +927,6 @@ class TestManagerApp:
             return
 
         self.status_var.set("Running OMR script...")
-        self.btn_run.config(state=DISABLED)
-
         def run():
             try:
                 def progress(msg):
@@ -907,11 +935,9 @@ class TestManagerApp:
                 self.root.after(0, lambda: messagebox.showinfo("Success", "OMR command executed successfully!"))
                 self.root.after(0, self.display_latest_csv)
                 self.root.after(0, lambda: self.status_var.set("Ready"))
-                self.root.after(0, lambda: self.btn_run.config(state=NORMAL))
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
                 self.root.after(0, lambda: self.status_var.set("Error running command"))
-                self.root.after(0, lambda: self.btn_run.config(state=NORMAL))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -931,14 +957,12 @@ class TestManagerApp:
                 if rows:
                     self.output_text.delete(1.0, END)
                     headers = list(rows[0].keys())
-                    header_line = " | ".join(headers)
                     self.output_text.insert(END, f"📄 Latest CSV: {os.path.basename(latest)}\n")
                     self.output_text.insert(END, "=" * 60 + "\n")
-                    self.output_text.insert(END, header_line + "\n")
+                    self.output_text.insert(END, " | ".join(headers) + "\n")
                     self.output_text.insert(END, "-" * 60 + "\n")
                     for row in rows:
-                        line = " | ".join(str(row.get(h, "")) for h in headers)
-                        self.output_text.insert(END, line + "\n")
+                        self.output_text.insert(END, " | ".join(str(row.get(h, "")) for h in headers) + "\n")
                     self.status_var.set(f"Displaying CSV: {os.path.basename(latest)}")
                 else:
                     self.output_text.delete(1.0, END)
@@ -957,22 +981,21 @@ class TestManagerApp:
 
         test_id = self.current_test_id
         test_name = self.current_test_data["name"] if self.current_test_data else "Selected Test"
+        school_name = self.api_client.selected_school["name"] if self.api_client.selected_school else "School"
 
-        self.status_var.set(f"Fetching results from PostgreSQL for test ID {test_id}...")
+        self.status_var.set(f"Fetching results for '{test_name}' ({school_name})...")
         self.output_text.delete(1.0, END)
-        self.output_text.insert(END, f"Fetching results for '{test_name}' from PostgreSQL Database via Express API...\n")
 
         def fetch():
             try:
-                results = self.api_client.get_test_results(test_id)
+                results = self.api_client.get_test_results_for_school(test_id)
                 def display():
                     self.output_text.delete(1.0, END)
                     if not results:
-                        self.output_text.insert(END, f"No OMR results stored in PostgreSQL database for test '{test_name}' (ID {test_id}).\n\nRun OMR processing and click 'Push Results to PostgreSQL (API)' to upload results.")
-                        self.status_var.set("No DB results found for this test.")
+                        self.output_text.insert(END, f"No OMR results stored in database for test '{test_name}' under {school_name}.\n\nRun OMR processing and click 'Push Results to Selected School DB' to upload results.")
                         return
 
-                    self.output_text.insert(END, f"🌐 PostgreSQL DB Results for '{test_name}' (Total Rows: {len(results)})\n")
+                    self.output_text.insert(END, f"🌐 Database Results for '{test_name}' - {school_name} (Total Rows: {len(results)})\n")
                     self.output_text.insert(END, "=" * 70 + "\n")
 
                     sample_data = results[0].get("data", {}) if isinstance(results[0].get("data"), dict) else json.loads(results[0].get("data", "{}"))
@@ -995,11 +1018,11 @@ class TestManagerApp:
                             line = str(row_data)
                         self.output_text.insert(END, line + "\n")
 
-                    self.status_var.set(f"Displayed {len(results)} DB result rows.")
+                    self.status_var.set(f"Displayed {len(results)} DB result rows for {school_name}.")
 
                 self.root.after(0, display)
             except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("API Error", f"Could not fetch test results from PostgreSQL API:\n{e}"))
+                self.root.after(0, lambda: messagebox.showerror("API Error", str(e)))
 
         threading.Thread(target=fetch, daemon=True).start()
 
@@ -1008,72 +1031,56 @@ class TestManagerApp:
             return
         output_dir = self.settings.get("output_dir")
         if not output_dir or not os.path.exists(output_dir):
-            messagebox.showwarning("Warning", "Output directory not configured or does not exist.")
+            messagebox.showwarning("Warning", "Output directory not configured.")
             return
 
         csv_files = self.processor.get_csv_files(output_dir)
         if not csv_files:
-            messagebox.showwarning("No CSV", "No OMR CSV result files found in output directory to push.")
+            messagebox.showwarning("No CSV", "No OMR CSV result files found in output directory.")
             return
 
         csv_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
         latest_csv = csv_files[0]
         test_id = self.current_test_data["id"]
         test_name = self.current_test_data["name"]
+        school_name = self.api_client.selected_school["name"] if self.api_client.selected_school else "School"
 
-        if not messagebox.askyesno(
-            "Push to PostgreSQL Database",
-            f"Push OMR results from '{os.path.basename(latest_csv)}' to PostgreSQL database for test '{test_name}' via Express API?"
-        ):
+        if not messagebox.askyesno("Push to Database", f"Push OMR results from '{os.path.basename(latest_csv)}' to database for test '{test_name}' under school '{school_name}'?"):
             return
 
-        self.status_var.set("Pushing CSV data to PostgreSQL via Express API...")
-        self.btn_push.config(state=DISABLED)
+        self.status_var.set(f"Pushing CSV data for {school_name}...")
 
         def upload():
             try:
                 def progress(msg):
                     self.root.after(0, lambda: self.status_var.set(msg))
 
-                self.api_client.upload_csv(
+                self.api_client.upload_csv_for_school(
                     csv_path=latest_csv,
                     test_id=test_id,
                     test_name=test_name,
                     progress_callback=progress
                 )
-                self.root.after(0, lambda: messagebox.showinfo(
-                    "Success",
-                    f"OMR results successfully uploaded to PostgreSQL database for '{test_name}'!"
-                ))
-                self.root.after(0, lambda: self.status_var.set("Uploaded to PostgreSQL successfully"))
-                self.root.after(0, lambda: self.btn_push.config(state=NORMAL))
+                self.root.after(0, lambda: messagebox.showinfo("Success", f"OMR results successfully uploaded for '{school_name}'!"))
+                self.root.after(0, lambda: self.status_var.set(f"Uploaded results to {school_name} successfully."))
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("Upload Error", str(e)))
-                self.root.after(0, lambda: self.status_var.set("Error uploading to PostgreSQL"))
-                self.root.after(0, lambda: self.btn_push.config(state=NORMAL))
 
         threading.Thread(target=upload, daemon=True).start()
 
     def check_api_status(self):
-        self.status_var.set("Checking Express API & PostgreSQL connection status...")
+        self.status_var.set("Checking API status...")
         def check():
             online, details = self.api_client.check_health()
-            if online:
-                pg_status = "Connected ✅" if details.get("postgresql_connected") else "Fallback Memory Mode (PG Disconnected) ⚠️"
-                msg = f"Express API Status: ONLINE 🟢\nBase URL: {self.api_client.api_base_url}\nPostgreSQL Status: {pg_status}"
-                self.root.after(0, lambda: messagebox.showinfo("API Connection Status", msg))
-                self.root.after(0, lambda: self.status_var.set("Express API Online"))
-            else:
-                msg = f"Express API Status: OFFLINE 🔴\nBase URL: {self.api_client.api_base_url}\n\nError details:\n{details}"
-                self.root.after(0, lambda: messagebox.showwarning("API Connection Status", msg))
-                self.root.after(0, lambda: self.status_var.set("Express API Offline"))
+            msg = f"API Status: ONLINE 🟢\nBase URL: {self.api_client.api_base_url}\nDetails: {details}" if online else f"API Offline: {details}"
+            self.root.after(0, lambda: messagebox.showinfo("API Connection Status", msg))
 
         threading.Thread(target=check, daemon=True).start()
 
     def open_settings(self):
         settings_win = Toplevel(self.root)
         settings_win.title("Preferences & API Settings")
-        settings_win.geometry("560x420")
+        settings_win.geometry("560x360")
         settings_win.transient(self.root)
         settings_win.grab_set()
 
@@ -1089,7 +1096,7 @@ class TestManagerApp:
                 var.set(path)
 
         row = 0
-        Label(settings_win, text="Express API Base URL:").grid(row=row, column=0, sticky=W, padx=8, pady=6)
+        Label(settings_win, text="Express / Strapi API URL:").grid(row=row, column=0, sticky=W, padx=8, pady=6)
         Entry(settings_win, textvariable=api_url_var, width=42).grid(row=row, column=1, padx=8, pady=6)
         row += 1
 
@@ -1118,54 +1125,12 @@ class TestManagerApp:
             self.settings.set("python_command", python_cmd_var.get().strip())
             self.settings.set("templates_dir", templates_dir_var.get().strip())
             self.settings.set("api_base_url", api_url_var.get().strip())
-
             self.api_client.api_base_url = api_url_var.get().strip().rstrip("/")
-            messagebox.showinfo("Settings Saved", "Preferences and Express API URL updated successfully.")
+            messagebox.showinfo("Settings Saved", "Preferences updated successfully.")
             settings_win.destroy()
 
         Button(settings_win, text="Save Settings", command=save_settings, width=15, bg="#007bff", fg="white").grid(row=row, column=0, pady=20)
         Button(settings_win, text="Cancel", command=settings_win.destroy, width=12).grid(row=row, column=1, pady=20)
-
-    def change_pin_dialog(self):
-        pin_win = Toplevel(self.root)
-        pin_win.title("Change Access PIN")
-        pin_win.geometry("360x220")
-        pin_win.transient(self.root)
-        pin_win.grab_set()
-
-        Label(pin_win, text="Current PIN:").grid(row=0, column=0, padx=8, pady=8, sticky=W)
-        old_pin = Entry(pin_win, show='*', width=12)
-        old_pin.grid(row=0, column=1, padx=8, pady=8)
-
-        Label(pin_win, text="New PIN:").grid(row=1, column=0, padx=8, pady=8, sticky=W)
-        new_pin = Entry(pin_win, show='*', width=12)
-        new_pin.grid(row=1, column=1, padx=8, pady=8)
-
-        Label(pin_win, text="Confirm New PIN:").grid(row=2, column=0, padx=8, pady=8, sticky=W)
-        confirm_pin = Entry(pin_win, show='*', width=12)
-        confirm_pin.grid(row=2, column=1, padx=8, pady=8)
-
-        def change():
-            old = old_pin.get().strip()
-            new = new_pin.get().strip()
-            confirm = confirm_pin.get().strip()
-            if not old or not new or not confirm:
-                messagebox.showerror("Error", "All fields are required.")
-                return
-            if len(new) != 6 or not new.isdigit():
-                messagebox.showerror("Error", "PIN must be 6 digits.")
-                return
-            if new != confirm:
-                messagebox.showerror("Error", "New PINs do not match.")
-                return
-            if self.settings.change_pin(old, new):
-                messagebox.showinfo("Success", "PIN changed successfully.")
-                pin_win.destroy()
-            else:
-                messagebox.showerror("Error", "Current PIN is incorrect.")
-
-        Button(pin_win, text="Change PIN", command=change, width=12, bg="#28a745", fg="white").grid(row=3, column=0, pady=15)
-        Button(pin_win, text="Cancel", command=pin_win.destroy, width=10).grid(row=3, column=1, pady=15)
 
 
 # ========================== ENTRY POINT ==========================
