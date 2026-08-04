@@ -1,192 +1,221 @@
-# Test Manager Application - Setup & User Manual
+# OMR Test Manager & Express.js REST JSON API (PostgreSQL Backend)
 
-This repository contains a cross-platform desktop GUI application (Tkinter) for managing OMR test forms, converting scanned PDFs into images, executing OMR evaluations, and syncing results with Google Firestore.
-
-This guide is structured into two parts:
-1. **Developer & Admin Setup**: For the technical team preparing, configuring, and maintaining the software.
-2. **School Setup & End-User Guide**: For school administrators and teachers running the software daily to process OMR sheets.
+A complete solution for OMR (Optical Mark Recognition) test evaluation, featuring a cross-platform desktop GUI application (Python Tkinter) and an Express.js REST JSON API backed by PostgreSQL to manage tests and student score results.
 
 ---
 
-# PART 1: Developer & Admin Setup (Technical Team)
+## 🌟 Architecture Overview
 
-This section explains the code architecture, how to configure Firestore, prepare OMR templates, and package settings.
-
-## 1. Local Database & Config Architecture
-* **SQLite Database (`tests.db`)**: Holds exam metadata (ID, test name, date, template folder name) in a flat table named `tests`.
-* **Config File (`app_config.json`)**: Stores file paths, execution commands, and the default PIN. 
-  * The configuration supports platform-specific keys (e.g. `python_command_win32` vs `python_command_darwin`) to allow seamless usage across both Windows and macOS machines.
-
-## 2. Google Cloud Firestore Setup
-To enable cloud synchronization of OMR results, configure Google Firestore:
-1. Create a Firebase/Google Cloud Project.
-2. Enable **Firestore Database** in Native mode.
-3. Go to **IAM & Admin → Service Accounts** in the GCP Console.
-4. Create a service account and assign the role **Cloud Datastore User** or **Firestore Data Owner**.
-5. Generate and download a new private key in **JSON** format.
-6. Provide this JSON file to the school administrators to load into their preferences.
-
-## 3. Creating & Packaging OMR Templates
-OMR Checker templates must be placed inside the `samples` (or `templates_dir`) folder. Each template must be a subdirectory containing:
-* `template.json`: Configures bubble layout coordinate maps.
-* `evaluation.json`: Configures the grading weights. Make sure it uses `"marking_schemes"` (plural) to comply with OMRChecker specifications.
-* `answer_key.csv`: A CSV map containing correct answers for all questions.
-* `omr_marker.jpg`: Alignment marker asset.
-
-## 4. Administrative Security (PIN Hashing)
-The login screen is protected by a 6-digit PIN.
-* PIN salt is set via `PIN_SALT` inside `index.py`.
-* The hash is computed using SHA-256 and stored as `pin_hash` inside `app_config.json`.
-* Default PIN is `123456`. You can update it using the GUI's **Settings → Change PIN** option.
-
-## 5. Building Standalone Installers
-You can package this application into a standalone executable that runs without requiring Python or other libraries installed on the target machine.
-
-* **macOS Installer (`.dmg`)**:
-  Run the build script on a Mac computer:
-  ```bash
-  python3 build_installer.py
-  ```
-  This creates `dist/OMRTestManager.app` and packages it into `dist/OMRTestManager.dmg`.
-* **Windows Executable (`.exe`)**:
-  Run the batch script on a Windows computer:
-  ```cmd
-  build_installer_win.bat
-  ```
-  This installs packages and compiles the app into a single executable `dist/OMRTestManager.exe`.
-* **Automated Cloud Builds (GitHub Actions)**:
-  Every push to the `main` or `mac-compatibility-and-fixes` branches triggers a GitHub Actions workflow. You can download the pre-compiled `OMRTestManager.exe` directly from the **Actions** tab of your repository.
-
----
-
-# PART 2: School Setup & End-User Guide (School Staff)
-
-Welcome! This guide will help you install and run the Test Manager software on your school computers.
-
-> [!TIP]
-> **Recommended: Use Standalone Installers**
-> If your technical team has provided you with the standalone installer, you **do not** need to install Python or run terminal commands:
-> * **Windows**: Simply download `OMRTestManager.exe` and double-click to run it.
-> * **macOS**: Download `OMRTestManager.dmg`, open it, and drag **OMRTestManager** into your **Applications** folder. Right-click the app and choose **Open** the first time to bypass the Apple security prompt.
-
----
-
-## 1. Prerequisites (Alternative: Developer/Source Installation)
-
-If you are running the software directly from the source code instead of the standalone installer, follow these steps:
-
-### Python Installation
-* Make sure Python 3.7 or higher is installed on your computer.
-
-### Package Installation
-Open your terminal (macOS) or Command Prompt (Windows) and install the required modules:
-```bash
-pip install Pillow pymupdf google-cloud-firestore opencv-python deepmerge dotmap jsonschema matplotlib numpy pandas rich screeninfo
+```
+ ┌──────────────────────────────────────────────┐
+ │     OMR Test Manager (Python Desktop GUI)    │
+ └──────────────────────┬───────────────────────┘
+                        │ HTTP REST JSON API
+ ┌──────────────────────▼───────────────────────┐
+ │       Express.js REST API (Port 5000)        │
+ └──────────────────────┬───────────────────────┘
+                        │ SQL Connection Pool (JSONB)
+ ┌──────────────────────▼───────────────────────┐
+ │            PostgreSQL Database               │
+ └──────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. Configuration & Preferences
-1. Run the application:
-   ```bash
-   python3 index.py
-   ```
-2. Log in using your 6-digit PIN (Default: `123456`).
-3. In the menu bar, go to **Settings → Preferences**.
-4. Configure the folders:
-   * **Input Directory**: Create a folder on your computer (e.g., `inputs`) and select it. This is where scanned pages will be prepared.
-   * **Output Directory**: Create a folder on your computer (e.g., `outputs`) and select it. This is where graded CSV results will be saved.
-   * **Templates Folder**: Choose the folder where your OMR templates are stored (e.g., `samples`).
-   * **Python Command**: Enter the path to your OMR evaluation script. Use `{input}` and `{output}` as placeholders:
-     * *Windows Example:* `py C:\OMRChecker-master\main.py --inputDir {input} --outputDir {output}`
-     * *macOS Example:* `python3 /Users/yourusername/OMRChecker-master/main.py --inputDir {input} --outputDir {output}`
-   * **Firestore Auth Key**: Browse and load the Google Cloud credentials JSON file provided by your technical team.
-   * **Firestore Collection**: Set the database collection name (default: `test_results`).
-5. Click **Save**.
+## 🚀 Key Features
+
+### 📱 OMR Test Manager Desktop Application (`index.py`)
+- **PostgreSQL Database Synchronization**: Switch between Local SQLite and PostgreSQL Database seamlessly.
+- **PIN-Protected Access**: 6-digit PIN authentication (default: `123456`).
+- **Test Management (CRUD)**: Create, edit, delete, and view tests synchronized with PostgreSQL via API.
+- **Native 300 DPI PDF Converter**: Uses PyMuPDF (`fitz`) to convert OMR sheet PDFs to images with **zero external software dependencies**.
+- **Template Auto-Discovery**: Automatically links templates (`answer_key.csv`, `evaluation.json`, `template.json`) with an intuitive `📁 Browse Dir` picker.
+- **OMR Evaluation Engine (`main.py`)**: Evaluates OMR sheet images, scores student answers, and outputs `OMR_Results.csv`.
+- **Upload & Inspect Database Scores**:
+  - **`☁️ Push Results to PostgreSQL (API)`**: Uploads CSV score rows to PostgreSQL via Express API.
+  - **`View DB Results for Selected Test`**: Queries PostgreSQL via Express API to inspect student score records.
+
+### 🌐 Express.js REST JSON API (`express-api/`)
+- **Full RESTful JSON Endpoints**: Endpoints for health status, test CRUD operations, and OMR CSV result uploads.
+- **PostgreSQL & JSONB Storage**: Flexible storage for dynamic CSV columns produced by OMR scanner scripts.
+- **Graceful Fallback Mode**: Operates in-memory safely if PostgreSQL is offline during local development.
 
 ---
 
-## 3. Standard Workflow (How to process exams)
+## 📖 Express.js REST API Documentation
 
-Follow these steps for every OMR test you need to grade:
+### Base URL: `http://localhost:5000/api`
 
-### Step A: Add a Test Exam
-1. Click **Add Test** on the dashboard.
-2. Enter the **Test Name** and **Date (YYYY-MM-DD)**.
-3. Select the appropriate layout template from the **Template Folder** dropdown list.
-4. Click **Save**.
+### Endpoints Overview
 
-### Step B: Load and Convert the Scan PDF
-1. Select your test from the left-hand menu.
-2. Click **Input PDF**.
-3. Choose the scanned PDF containing all student answer sheets.
-4. Confirm the page count on the pop-up window. The app will automatically split the PDF into page images and copy the layout template.
-
-### Step C: Run OMR Grading
-1. Click **Run Command**.
-2. Click **Yes** to confirm.
-3. The OMR engine will grade the sheets. Once finished, a table preview of the results containing student scores, Roll Numbers, and marked answers will load automatically on the right panel.
-
-### Step D: Sync Results with Cloud
-1. Click **Push to Firestore**.
-2. Confirm the prompt to upload. 
-3. The results will be pushed directly to your school cloud database!
+| Method | Endpoint | Description | Request Body | Response Format |
+|---|---|---|---|---|
+| `GET` | `/api/health` | Service & DB Health Check | None | `{ status: "online", postgresql_connected: boolean }` |
+| `GET` | `/api/tests` | Fetch all tests from PostgreSQL | None | `{ success: true, count: number, data: [...] }` |
+| `GET` | `/api/tests/:id` | Fetch single test details | None | `{ success: true, data: { id, name, date, template_folder } }` |
+| `POST` | `/api/tests` | Create a new test | `{ name, date, template_folder }` | `{ success: true, data: { id, name, ... } }` |
+| `PUT` | `/api/tests/:id` | Update an existing test | `{ name, date, template_folder }` | `{ success: true, data: { ... } }` |
+| `DELETE` | `/api/tests/:id` | Delete test & associated results | None | `{ success: true, message: "Deleted" }` |
+| `POST` | `/api/tests/:id/results` | Upload OMR CSV score rows to test | `{ test_id, test_name, rows: [...] }` | `{ success: true, inserted_count: number }` |
+| `GET` | `/api/tests/:id/results` | Fetch student scores for test | None | `{ success: true, count: number, data: [...] }` |
+| `POST` | `/api/results` | Batch upload score rows | `{ test_name, rows: [...] }` | `{ success: true, inserted_count: number }` |
 
 ---
 
-## 4. Troubleshooting Guide for Staff
-* **Error: "Template folder '...' not found."**
-  * Check that your **Templates Folder** in Preferences contains the folder name selected for this test.
-* **The CSV Preview shows old values or doesn't update.**
-  * Click on another test name on the left sidebar and click back to force the preview window to reload.
-* **Error: "Firestore Auth Key not found."**
-  * Go to **Settings → Preferences** and check that you have selected a valid credentials JSON key file.
+### Detailed API Request & Response Examples
+
+#### 1. Service Health Check
+- **Endpoint**: `GET /api/health`
+- **Response**:
+```json
+{
+  "status": "online",
+  "service": "OMR Express API",
+  "postgresql_connected": true,
+  "timestamp": "2026-08-02T10:40:07.310Z"
+}
+```
+
+#### 2. Create a Test
+- **Endpoint**: `POST /api/tests`
+- **Request Body**:
+```json
+{
+  "name": "NEET Grand Test 1",
+  "date": "2026-08-05",
+  "template_folder": "neet_60_template"
+}
+```
+- **Response**:
+```json
+{
+  "success": true,
+  "message": "Test created successfully",
+  "data": {
+    "id": 1,
+    "name": "NEET Grand Test 1",
+    "date": "2026-08-05",
+    "template_folder": "neet_60_template",
+    "created_at": "2026-08-02T10:40:07.337Z"
+  }
+}
+```
+
+#### 3. Upload OMR CSV Score Rows
+- **Endpoint**: `POST /api/tests/1/results`
+- **Request Body**:
+```json
+{
+  "test_id": 1,
+  "test_name": "NEET Grand Test 1",
+  "rows": [
+    { "RollNo": "10001", "Name": "Student A", "Score": "95", "Correct": "25", "Incorrect": "5" },
+    { "RollNo": "10002", "Name": "Student B", "Score": "88", "Correct": "23", "Incorrect": "4" }
+  ]
+}
+```
+- **Response**:
+```json
+{
+  "success": true,
+  "message": "Successfully pushed 2 test result rows to database.",
+  "inserted_count": 2,
+  "test_id": 1
+}
+```
+
+#### 4. Fetch Student Results for Test
+- **Endpoint**: `GET /api/tests/1/results`
+- **Response**:
+```json
+{
+  "success": true,
+  "count": 2,
+  "data": [
+    {
+      "id": 1,
+      "test_id": 1,
+      "test_name": "NEET Grand Test 1",
+      "data": {
+        "RollNo": "10001",
+        "Name": "Student A",
+        "Score": "95",
+        "Correct": "25",
+        "Incorrect": "5"
+      },
+      "uploaded_at": "2026-08-02T10:40:07.345Z"
+    }
+  ]
+}
+```
 
 ---
 
-# PART 3: AI Pair Programming History & Prompt Log
+## 🛠️ Installation & Setup
 
-This section details the historical developer steps, prompts, commits, and debugging processes that took place during development.
+### 1. Requirements
+- **Python**: 3.7 or higher
+- **Node.js**: v16 or higher
+- **PostgreSQL**: (Optional for production; API includes in-memory dev mode if PostgreSQL is offline)
 
-## Step 1: macOS Compatibility & Firestore Bug Fixes
-* **What We Did**: Added platform-specific configuration keys (`_darwin`, `_win32`) in `SettingsManager` to support multi-platform user environments, fixed Poppler paths, and cleared Firestore variable NameErrors.
-* **Commit**: `82dd9bd`
+### 2. Express API Server Setup
+```bash
+cd express-api
+npm install
+npm start
+```
+*The Express API will run on `http://localhost:5000/api`.*
 
-## Step 2: CSV Preview Formatting & Indentation Error
-* **What We Did**: Filtered path columns from CSV preview, formatted file labels (e.g. `page_1.jpg` -> `Page 1`), and resolved a start-up indent block issue.
+### 3. Python Application Setup
+```bash
+pip install -r requirements.txt
+run_app.bat
+```
+*(Or run directly with `python index.py`)*
 
-## Step 3: Documentation Separation
-* **What We Did**: Restructured the documentation into developer setup (Part 1) and end-user setup (Part 2) guides.
+---
 
-## Step 4: Standalone Packaging & Eliminating Poppler
-* **What We Did**: Replaced `pdf2image` (Poppler dependent) with `pymupdf` (pure python PDF library) to completely eliminate Poppler dependencies. Bundled OMRChecker directly inside the app folder to run programmatically.
-* **Commit**: `758897a`
+## 📖 How to Use the Application
 
-## Step 5: Windows Executable & CI Build Errors
-* **What We Did**: Added `build_installer_win.bat` for local Windows compiling and created a GitHub Actions workflow (`build.yml`) to build the Windows `.exe` automatically on push.
-* **Commit**: `860c3c9`
+1. **Login**: Launch the app using `run_app.bat` and enter the default 6-digit PIN **`123456`**.
+2. **Add / Manage Tests**: Click **`➕ Add Test`** to create a test, choose a date, and select a template folder. The test automatically syncs with PostgreSQL.
+3. **Process PDF OMR Sheet**:
+   - Select your test and click **`📄 Input PDF`**.
+   - Pick an OMR PDF sheet (e.g. `sample_omr_sheet.pdf`).
+   - The app converts pages to images at 300 DPI and copies the template files.
+4. **Run OMR Evaluation Engine**:
+   - Click **`⚙️ Run OMR Command`**.
+   - `main.py` evaluates the sheet images against `answer_key.csv` and displays student score rows in the preview box.
+5. **Push to PostgreSQL**:
+   - Click **`☁️ Push Results to PostgreSQL (API)`** to save the scores in PostgreSQL.
+6. **View Database Results**:
+   - Click **`View DB Results for Selected Test`** to query live scores stored in PostgreSQL.
 
-## Step 6: OMR Refinements, Directory Isolation, and Crash Fixes
-* **What We Did**: Isolated test folders by test ID, fixed relative path alignment issues, disabled OpenCV thread debug popups causing Cocoa GUI crashes on macOS, recursive template scanning, and resolved a page_count `NameError` crash.
-* **Commits**: `7f76f8f` to `8f2a2ca`
+---
 
-## Step 7: Packaging and Distributing Installers
-* **What We Did**: Successfully compiled the macOS standalone `.dmg` installer locally and verified automated compilation of the Windows `.exe` installer.
+## 🧪 Automated Testing
 
-## Step 8: Project Completion & Installer Distribution
-* **What We Did**: Generated and validated the final installers on macOS (`.dmg`) and Windows (`.exe` via GitHub Actions), updated all manuals with installer guides, and submitted the upstream Pull Request #4.
+- **Node.js API Test Suite**: `node express-api/test-api.js`
+- **Python App API Integration Suite**: `python test_python_app_api.py`
 
-## Step 9: Option Analysis, 60Q Template, and Robust Answer Key Validation
-* **What We Did**: Created a pixel-perfect 60-question `Standard_Template` layout that precisely targets the school's OMR sheet (Mathematics 20Q, Physics 15Q, Chemistry 15Q, and MAT 10Q). Added a post-processing Option Analysis report generator that outputs selection statistics and success rates for each question in `Option_Analysis.csv`. Modified the OMR engine's verification step to automatically filter and align the answer key questions list to match the template's output columns (allowing 120-question keys to run seamlessly on 60-question templates).
-* **Commit**: `2fa619b`
+---
 
-## Step 10: PyInstaller Frozen Dynamic Loader Fix
-* **What We Did**: Explicitly registered and imported built-in OMR Checker processor classes (CropOnMarkers, CropPage, FeatureBasedAlignment, Levels, MedianBlur, GaussianBlur) to prevent standalone compiled binaries from crashing during dynamic directory walks.
-* **Commit**: `93b6345`
+## 📂 Repository File Structure
 
-## Step 11: Auto-Extract Answer Key, Option Analysis Filtering, & GUI/Firestore Exclusions
-* **What We Did**: Implemented automatic answer key extraction from the first page of the scanned PDF (setting File ID to "Answer Key" and Roll Number to "KEY"), filtered metadata columns from Option Analysis stats, and hid `Option_Analysis.csv` from both the GUI table preview and Google Firestore sync list.
-* **Commit**: `8ee0a0a`
-
-
-
+```
+.
+├── index.py                 # Main Tkinter Desktop Application
+├── main.py                  # OMR Evaluation Engine script
+├── app_config.json          # Application configuration
+├── requirements.txt         # Python dependencies (Pillow, PyMuPDF, pypdf)
+├── run_app.bat              # One-click Windows batch launcher
+├── test_python_app_api.py   # Python API integration test suite
+├── express-api/             # Express.js REST JSON API Backend
+│   ├── server.js            # Express server entry point
+│   ├── routes/tests.js      # REST Router for tests & JSONB results
+│   ├── db/db.js             # PostgreSQL connection pool & memory fallback
+│   ├── db/schema.sql        # PostgreSQL DDL table definitions
+│   ├── test-api.js          # API test suite
+│   └── package.json         # Node.js dependencies
+└── README.md                # Project documentation
+```
