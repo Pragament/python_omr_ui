@@ -1,0 +1,30 @@
+// Prisma Schema for OMR Test Manager CMS & API
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+/// CMS Content Model for OMR Tests
+model Test {
+  id             Int          @id @default(autoincrement())
+  name           String
+  date           String
+  templateFolder String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  results        TestResult[]
+}
+
+/// CMS Content Model for OMR Student Score Results (JSON data)
+model TestResult {
+  id         Int      @id @default(autoincrement())
+  testId     Int?
+  testName   String
+  data       String   // JSON string storing OMR student row scores (RollNo, Name, Score, etc.)
+  uploadedAt DateTime @default(now())
+  test       Test?    @relation(fields: [testId], references: [id], onDelete: Cascade)
+}

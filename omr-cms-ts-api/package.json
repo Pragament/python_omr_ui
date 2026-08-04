@@ -1,0 +1,40 @@
+{
+  "name": "omr-cms-ts-api",
+  "version": "1.0.0",
+  "description": "Node.js & TypeScript CMS and API with Prisma ORM for OMR Test Manager backed by PostgreSQL / SQLite",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "ts-node src/server.ts",
+    "db:push": "prisma db push",
+    "db:generate": "prisma generate",
+    "test": "ts-node test-api.ts"
+  },
+  "keywords": [
+    "omr",
+    "typescript",
+    "cms",
+    "prisma",
+    "orm",
+    "express",
+    "postgresql",
+    "rest-api"
+  ],
+  "author": "OMR Test Manager Team",
+  "license": "MIT",
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.17.6",
+    "prisma": "^5.22.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3"
+  }
+}
