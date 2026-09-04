@@ -863,6 +863,9 @@ class TestManagerApp:
         self.btn_verify = Button(action_frame, text="Verify CSV", command=self.verify_results, state=DISABLED)
         self.btn_verify.pack(side=LEFT, padx=2)
 
+        self.btn_darken = Button(action_frame, text="Darken CSV", command=self.darken_csv, state=DISABLED)
+        self.btn_darken.pack(side=LEFT, padx=2)
+
         # Output display area
         self.output_frame = LabelFrame(right_frame, text="CSV Output", padx=5, pady=5)
         self.output_frame.pack(fill=BOTH, expand=True, pady=5)
@@ -920,6 +923,7 @@ class TestManagerApp:
                 self.btn_notify.config(state=NORMAL)
                 self.btn_export_csv.config(state=NORMAL)
                 self.btn_verify.config(state=NORMAL)
+                self.btn_darken.config(state=NORMAL)
                 # Clear output display
                 self.output_text.delete(1.0, END)
                 # Check if CSV exists in output dir and display it
@@ -935,6 +939,7 @@ class TestManagerApp:
             self.btn_notify.config(state=DISABLED)
             self.btn_export_csv.config(state=DISABLED)
             self.btn_verify.config(state=DISABLED)
+            self.btn_darken.config(state=DISABLED)
 
     # ---------- CRUD DIALOGS ----------
     def add_test_dialog(self):
@@ -1547,6 +1552,69 @@ class TestManagerApp:
                 self.root.after(0, show_error)
 
         threading.Thread(target=run_notifications, daemon=True).start()
+
+    # ---------- DARKEN CSV ----------
+    def darken_csv(self):
+        if not self.current_test_id:
+            messagebox.showwarning("Warning", "Please select a test first.")
+            return
+
+        input_dir = self.settings.get("input_dir")
+        if not os.path.exists(input_dir):
+            messagebox.showerror("Error", f"Input directory '{input_dir}' does not exist.")
+            return
+
+        exts = (".png", ".jpg", ".jpeg")
+        img_files = [
+            os.path.join(input_dir, f)
+            for f in os.listdir(input_dir)
+            if f.lower().endswith(exts) and not f.lower().startswith("omr_marker")
+        ]
+
+        if not img_files:
+            messagebox.showwarning("No Sheets Found", "No scanned image sheets found in input directory. Please run 'Input PDF' first.")
+            return
+
+        if not messagebox.askyesno("Confirm Darken", f"Found {len(img_files)} sheet(s) in input folder.\nDo you want to detect and darken faint OMR bubbles?"):
+            return
+
+        self.btn_darken.config(state=DISABLED)
+        self.btn_run.config(state=DISABLED)
+
+        def process():
+            try:
+                from PIL import Image
+                from pdf_darken import process_image
+                
+                total_darkened = 0
+                processed_count = 0
+
+                for img_path in sorted(img_files):
+                    try:
+                        pil_img = Image.open(img_path)
+                        darkened_img, _, candidates = process_image(pil_img)
+                        if candidates > 0:
+                            darkened_img.save(img_path)
+                            total_darkened += candidates
+                        processed_count += 1
+                        msg = f"Darkening faint bubbles: {processed_count}/{len(img_files)} sheets processed ({total_darkened} marks darkened)"
+                        self.root.after(0, lambda m=msg: self.status_var.set(m))
+                    except Exception as e:
+                        print(f"Error darkening image {img_path}: {e}")
+
+                done_msg = f"Darkening complete: processed {processed_count} sheet(s) and darkened {total_darkened} faint bubble mark(s)."
+                self.root.after(0, lambda: self.status_var.set(done_msg))
+                self.root.after(0, lambda: messagebox.showinfo("Darken Complete", done_msg))
+            except Exception as e:
+                err_msg = f"Failed to darken sheets: {e}"
+                self.root.after(0, lambda: messagebox.showerror("Error", err_msg))
+            finally:
+                def reenable():
+                    self.btn_darken.config(state=NORMAL)
+                    self.btn_run.config(state=NORMAL)
+                self.root.after(0, reenable)
+
+        threading.Thread(target=process, daemon=True).start()
 
     # ---------- EXPORT CSV ----------
     def export_csv(self):
