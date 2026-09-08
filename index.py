@@ -586,6 +586,10 @@ class PDFProcessor:
                     def emit(self, record):
                         try:
                             msg = self.format(record)
+                            if "Error: No circle found in Quad" in msg:
+                                first_line = msg.strip().split("\n")[0]
+                                fname = os.path.basename(first_line) if first_line else "Sheet"
+                                msg = f"⚠️ Sheet '{fname}': Corner alignment markers not detected. Moved to ErrorFiles."
                             self.callback(msg)
                         except Exception:
                             pass
@@ -610,11 +614,14 @@ class PDFProcessor:
                         "setLayout": False
                     }
                     
+                    stats = None
                     for root_path in args["input_paths"]:
-                        entry_point(Path(root_path), args)
+                        stats = entry_point(Path(root_path), args)
                         
                     if progress_callback:
                         progress_callback("OMR completed successfully.")
+
+                    return stats
                         
                 finally:
                     # Clean up handler
@@ -866,6 +873,9 @@ class TestManagerApp:
         self.btn_darken = Button(action_frame, text="Darken CSV", command=self.darken_csv, state=DISABLED)
         self.btn_darken.pack(side=LEFT, padx=2)
 
+        self.btn_replace = Button(action_frame, text="Replace Sheet", command=self.replace_error_sheet, state=DISABLED)
+        self.btn_replace.pack(side=LEFT, padx=2)
+
         # Output display area
         self.output_frame = LabelFrame(right_frame, text="CSV Output", padx=5, pady=5)
         self.output_frame.pack(fill=BOTH, expand=True, pady=5)
@@ -924,6 +934,7 @@ class TestManagerApp:
                 self.btn_export_csv.config(state=NORMAL)
                 self.btn_verify.config(state=NORMAL)
                 self.btn_darken.config(state=NORMAL)
+                self.btn_replace.config(state=NORMAL)
                 # Clear output display
                 self.output_text.delete(1.0, END)
                 # Check if CSV exists in output dir and display it
@@ -940,6 +951,7 @@ class TestManagerApp:
             self.btn_export_csv.config(state=DISABLED)
             self.btn_verify.config(state=DISABLED)
             self.btn_darken.config(state=DISABLED)
+            self.btn_replace.config(state=DISABLED)
 
     # ---------- CRUD DIALOGS ----------
     def add_test_dialog(self):
@@ -1234,31 +1246,275 @@ class TestManagerApp:
         self.btn_export_csv.config(state=DISABLED)
         self.btn_verify.config(state=DISABLED)
 
+        # Create Live Progress Modal Window
+        progress_win = Toplevel(self.root)
+        progress_win.title("OMR Grading Live Progress")
+        progress_win.geometry("640x520")
+        progress_win.transient(self.root)
+        progress_win.grab_set()
+
+        # Header Frame
+        header_frame = Frame(progress_win, bg="#0f172a", padx=15, pady=12)
+        header_frame.pack(fill=X)
+
+        title_label = Label(
+            header_frame,
+            text="⚙️ Live OMR Batch Grading",
+            font=("Arial", 15, "bold"),
+            bg="#0f172a",
+            fg="white"
+        )
+        title_label.pack(anchor=W)
+
+        sub_label = Label(
+            header_frame,
+            text="Evaluating student response sheets from PDF / input directory...",
+            font=("Arial", 10),
+            bg="#0f172a",
+            fg="#94a3b8"
+        )
+        sub_label.pack(anchor=W, pady=(2, 0))
+
+        # Progress bar
+        pbar_frame = Frame(progress_win, padx=15, pady=10)
+        pbar_frame.pack(fill=X)
+
+        pbar = ttk.Progressbar(pbar_frame, orient=HORIZONTAL, mode='determinate')
+        pbar.pack(fill=X, side=TOP, pady=2)
+
+        pbar_text_var = StringVar(value="Initializing OMR Engine...")
+        pbar_label = Label(pbar_frame, textvariable=pbar_text_var, font=("Arial", 10), fg="#475569")
+        pbar_label.pack(anchor=W, pady=(4, 0))
+
+        # Stat cards
+        cards_frame = Frame(progress_win, padx=15, pady=5)
+        cards_frame.pack(fill=X)
+
+        var_total = StringVar(value="0")
+        var_running = StringVar(value="-")
+        var_success = StringVar(value="0")
+        var_error = StringVar(value="0")
+
+        def make_live_card(parent, title, text_var, bg_color, fg_color):
+            card = Frame(parent, bg=bg_color, bd=1, relief=SOLID, padx=8, pady=6)
+            card.pack(side=LEFT, expand=True, fill=BOTH, padx=3)
+            Label(card, text=title, font=("Arial", 9), bg=bg_color, fg=fg_color).pack()
+            Label(card, textvariable=text_var, font=("Arial", 14, "bold"), bg=bg_color, fg=fg_color).pack()
+            return card
+
+        make_live_card(cards_frame, "Total Sheets", var_total, "#f1f5f9", "#334155")
+        make_live_card(cards_frame, "Current Sheet", var_running, "#eff6ff", "#1d4ed8")
+        make_live_card(cards_frame, "Graded", var_success, "#ecfdf5", "#047857")
+        make_live_card(cards_frame, "Unreadable", var_error, "#fef2f2", "#dc2626")
+
+        # Live Log Text Area
+        log_frame = LabelFrame(progress_win, text="Live Activity Log", padx=10, pady=5)
+        log_frame.pack(fill=BOTH, expand=True, padx=15, pady=8)
+
+        log_text = scrolledtext.ScrolledText(log_frame, height=9, wrap=WORD, font=("Consolas", 10))
+        log_text.pack(fill=BOTH, expand=True)
+
+        log_text.tag_config("info", foreground="#1e293b")
+        log_text.tag_config("error", foreground="#dc2626", font=("Consolas", 10, "bold"))
+        log_text.tag_config("success", foreground="#047857")
+
+        def update_ui_log(msg):
+            # Parse progress messages to update stat cards and progress bar dynamically
+            if "Starting OMR grading for" in msg:
+                try:
+                    num = int(msg.split("for")[1].split("sheet")[0].strip())
+                    var_total.set(str(num))
+                    pbar["maximum"] = num
+                except Exception:
+                    pass
+            elif "Grading sheet" in msg:
+                try:
+                    parts = msg.split()
+                    curr = int(parts[2])
+                    total = int(parts[4])
+                    img_name = msg.split("'")[1] if "'" in msg else ""
+                    var_total.set(str(total))
+                    var_running.set(f"{curr}/{total}")
+                    pbar["value"] = curr
+                    pbar_text_var.set(f"Grading sheet {curr} of {total} ({int(curr*100/total)}%): {img_name}")
+                except Exception:
+                    pass
+            elif "Graded successfully" in msg or "Graded (Multi-marked" in msg:
+                try:
+                    var_success.set(str(int(var_success.get()) + 1))
+                except Exception:
+                    pass
+            elif "Alignment failed" in msg or "Unreadable scan" in msg or "Error" in msg:
+                try:
+                    var_error.set(str(int(var_error.get()) + 1))
+                except Exception:
+                    pass
+
+            tag = "info"
+            if "Error" in msg or "failed" in msg or "Unreadable" in msg or "⚠️" in msg:
+                tag = "error"
+            elif "Graded successfully" in msg or "Completed grading" in msg or "Loaded answer key" in msg:
+                tag = "success"
+
+            log_text.insert(END, msg + "\n", tag)
+            log_text.see(END)
+            self.status_var.set(msg)
+
         def run():
             try:
                 def progress(msg):
-                    self.root.after(0, lambda: self.status_var.set(msg))
-                self.processor.run_command(progress_callback=progress)
-                self.root.after(0, lambda: messagebox.showinfo("Success", "Command executed successfully."))
-                self.root.after(0, self.display_latest_csv)
-                self.root.after(0, lambda: self.status_var.set("Ready"))
-                self.root.after(0, lambda: self.btn_run.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_input_pdf.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_push.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_notify.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_export_csv.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_verify.config(state=NORMAL))
+                    self.root.after(0, lambda m=msg: update_ui_log(m))
+
+                stats = self.processor.run_command(progress_callback=progress)
+                
+                total_f = stats.get("total_files", 0) if isinstance(stats, dict) else 0
+                succ_f = stats.get("success_count", 0) if isinstance(stats, dict) else 0
+                err_f = stats.get("error_count", 0) if isinstance(stats, dict) else 0
+
+                final_status = (
+                    f"Grading complete: {succ_f}/{total_f} sheets graded successfully ({err_f} unreadable moved to ErrorFiles)."
+                    if err_f > 0
+                    else f"Grading complete: All {total_f} sheets graded successfully!"
+                )
+
+                def on_complete():
+                    try:
+                        progress_win.destroy()
+                    except Exception:
+                        pass
+                    self.display_latest_csv()
+                    self.show_grading_summary_dialog(stats)
+                    self.status_var.set(final_status)
+                    self.btn_run.config(state=NORMAL)
+                    self.btn_input_pdf.config(state=NORMAL)
+                    self.btn_push.config(state=NORMAL)
+                    self.btn_notify.config(state=NORMAL)
+                    self.btn_export_csv.config(state=NORMAL)
+                    self.btn_verify.config(state=NORMAL)
+
+                self.root.after(500, on_complete)
+
             except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
-                self.root.after(0, lambda: self.status_var.set("Error"))
-                self.root.after(0, lambda: self.btn_run.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_input_pdf.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_push.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_notify.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_export_csv.config(state=NORMAL))
-                self.root.after(0, lambda: self.btn_verify.config(state=NORMAL))
+                def on_error(err_msg):
+                    try:
+                        progress_win.destroy()
+                    except Exception:
+                        pass
+                    messagebox.showerror("Error", err_msg)
+                    self.status_var.set("Error")
+                    self.btn_run.config(state=NORMAL)
+                    self.btn_input_pdf.config(state=NORMAL)
+                    self.btn_push.config(state=NORMAL)
+                    self.btn_notify.config(state=NORMAL)
+                    self.btn_export_csv.config(state=NORMAL)
+                    self.btn_verify.config(state=NORMAL)
+
+                self.root.after(0, lambda err_msg=str(e): on_error(err_msg))
 
         threading.Thread(target=run, daemon=True).start()
+
+    def show_grading_summary_dialog(self, stats):
+        summary_win = Toplevel(self.root)
+        summary_win.title("OMR Grading Summary")
+        summary_win.geometry("640x540")
+        summary_win.transient(self.root)
+        summary_win.grab_set()
+
+        total = stats.get("total_files", 0) if isinstance(stats, dict) else 0
+        success = stats.get("success_count", 0) if isinstance(stats, dict) else 0
+        multi_marked = stats.get("multi_marked_count", 0) if isinstance(stats, dict) else 0
+        errors = stats.get("error_count", 0) if isinstance(stats, dict) else 0
+        error_details = stats.get("error_details", []) if isinstance(stats, dict) else []
+
+        # Top Title Header Frame
+        header_frame = Frame(summary_win, bg="#1e293b", padx=15, pady=15)
+        header_frame.pack(fill=X)
+
+        title_label = Label(
+            header_frame,
+            text="📊 OMR Batch Grading Report",
+            font=("Arial", 16, "bold"),
+            bg="#1e293b",
+            fg="white"
+        )
+        title_label.pack(anchor=W)
+
+        subtitle_text = f"Batch processing completed for {total} sheet(s) in PDF / input directory."
+        sub_label = Label(
+            header_frame,
+            text=subtitle_text,
+            font=("Arial", 11),
+            bg="#1e293b",
+            fg="#94a3b8"
+        )
+        sub_label.pack(anchor=W, pady=(2, 0))
+
+        # Statistics Cards Frame
+        cards_frame = Frame(summary_win, padx=15, pady=10)
+        cards_frame.pack(fill=X)
+
+        def make_card(parent, title, value, bg_color, fg_color):
+            card = Frame(parent, bg=bg_color, bd=1, relief=SOLID, padx=10, pady=8)
+            card.pack(side=LEFT, expand=True, fill=BOTH, padx=4)
+            Label(card, text=title, font=("Arial", 10), bg=bg_color, fg=fg_color).pack()
+            Label(card, text=str(value), font=("Arial", 16, "bold"), bg=bg_color, fg=fg_color).pack()
+            return card
+
+        make_card(cards_frame, "Total Sheets", total, "#f1f5f9", "#334155")
+        make_card(cards_frame, "Graded", success, "#ecfdf5", "#047857")
+        make_card(cards_frame, "Multi-Marked", multi_marked, "#fffbe6", "#b45309")
+        make_card(cards_frame, "Unreadable / Failed", errors, "#fef2f2" if errors > 0 else "#f1f5f9", "#dc2626" if errors > 0 else "#64748b")
+
+        # Main Info & Guidance Area
+        info_frame = LabelFrame(summary_win, text="Batch Status & Explanation", padx=10, pady=10)
+        info_frame.pack(fill=BOTH, expand=True, padx=15, pady=5)
+
+        info_text = scrolledtext.ScrolledText(info_frame, height=10, wrap=WORD, font=("Arial", 11))
+        info_text.pack(fill=BOTH, expand=True)
+
+        if errors == 0:
+            info_text.insert(END, "✅ BATCH SUCCESS: All student sheets were graded successfully!\n\n")
+            info_text.insert(END, f"• All {total} student response sheet(s) were aligned, evaluated, and saved to the CSV results table.\n")
+            info_text.insert(END, "• You can click 'Verify CSV' to visually inspect student sheets or 'Export CSV' to download the results.\n")
+        else:
+            info_text.insert(END, f"⚠️ NOTICE: {success} of {total} sheets graded successfully ({errors} failed).\n\n")
+            info_text.insert(END, "Why did the command run successfully?\n")
+            info_text.insert(END, f"• The OMR engine graded all {success} valid student sheets and saved their scores to the results table.\n")
+            info_text.insert(END, f"• The {errors} unreadable sheet(s) could not be aligned (corner markers missing or bad scan) and were moved to 'ErrorFiles' so class evaluation was not stopped.\n\n")
+            info_text.insert(END, f"Unreadable / Failed Sheets ({errors}):\n")
+            for fname, reason in error_details:
+                info_text.insert(END, f"  • {fname}: {reason}\n")
+            info_text.insert(END, "\n📋 2-STEP ERROR RECOVERY WORKFLOW:\n")
+            info_text.insert(END, "  🔹 STEP 1 (Auto Darken): Click 'Darken & Re-run' below to auto-enhance faint bubbles/markers.\n")
+            info_text.insert(END, "  🔹 STEP 2 (Replace Sheet): If darkening fails or the sheet is damaged, click 'Replace & Process Sheet' below to upload a new scan for that student sheet.\n")
+
+        info_text.config(state=DISABLED)
+
+        # Buttons
+        btn_frame = Frame(summary_win, pady=10)
+        btn_frame.pack(fill=X)
+
+        def open_error_folder():
+            output_dir = self.settings.get("output_dir")
+            error_dir = os.path.join(output_dir, "Manual", "ErrorFiles")
+            os.makedirs(error_dir, exist_ok=True)
+            try:
+                if sys.platform == "darwin":
+                    subprocess.run(["open", error_dir])
+                elif sys.platform == "win32":
+                    os.startfile(error_dir)
+                else:
+                    subprocess.run(["xdg-open", error_dir])
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open error folder: {e}")
+
+        Button(btn_frame, text="OK", command=summary_win.destroy, width=8, font=("Arial", 10, "bold")).pack(side=RIGHT, padx=8)
+        Button(btn_frame, text="Verify Sheets", command=lambda: [summary_win.destroy(), self.verify_results()], width=11).pack(side=RIGHT, padx=3)
+        if errors > 0:
+            first_err_file = error_details[0][0] if error_details else None
+            Button(btn_frame, text="Replace & Process Sheet", command=lambda: [summary_win.destroy(), self.replace_error_sheet(first_err_file)], width=18, bg="#047857", fg="white", font=("Arial", 10, "bold")).pack(side=RIGHT, padx=3)
+            Button(btn_frame, text="Darken & Re-run", command=lambda: [summary_win.destroy(), self.darken_csv()], width=13, bg="#1d4ed8", fg="white").pack(side=RIGHT, padx=3)
+            Button(btn_frame, text="Open Error Folder", command=open_error_folder, width=14).pack(side=RIGHT, padx=3)
 
     # ---------- DISPLAY CSV ----------
     def display_latest_csv(self):
@@ -1616,36 +1872,175 @@ class TestManagerApp:
 
         threading.Thread(target=process, daemon=True).start()
 
+    # ---------- REPLACE ERROR SHEET ----------
+    def replace_error_sheet(self, target_fname=None):
+        if not self.current_test_id:
+            messagebox.showwarning("Warning", "Please select a test first.")
+            return
+
+        input_dir = self.settings.get("input_dir")
+        output_dir = self.settings.get("output_dir")
+
+        if not os.path.exists(input_dir):
+            messagebox.showerror("Error", f"Input directory '{input_dir}' does not exist.")
+            return
+
+        # Find error files if target_fname is not specified
+        error_csv = os.path.join(output_dir, "Manual", "ErrorFiles.csv")
+        error_files = []
+        if os.path.exists(error_csv):
+            try:
+                with open(error_csv, mode='r', newline='', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        fid = row.get("file_id", "").strip()
+                        if fid and fid != "file_id":
+                            error_files.append(fid)
+            except Exception:
+                pass
+
+        if not target_fname:
+            if not error_files:
+                exts = (".png", ".jpg", ".jpeg")
+                all_imgs = [f for f in os.listdir(input_dir) if f.lower().endswith(exts) and not f.lower().startswith("omr_marker")]
+                if not all_imgs:
+                    messagebox.showwarning("No Sheets", "No student sheets found in input directory.")
+                    return
+
+                select_win = Toplevel(self.root)
+                select_win.title("Select Sheet to Replace")
+                select_win.geometry("420x200")
+                select_win.transient(self.root)
+                select_win.grab_set()
+
+                Label(select_win, text="Select the student sheet page you want to replace:", font=("Arial", 11, "bold")).pack(pady=(15, 5))
+                combo_var = StringVar(value=all_imgs[0])
+                combo = ttk.Combobox(select_win, textvariable=combo_var, values=all_imgs, state="readonly", font=("Arial", 11), width=30)
+                combo.pack(pady=10)
+
+                def on_confirm_select():
+                    chosen = combo_var.get()
+                    select_win.destroy()
+                    self.replace_error_sheet(target_fname=chosen)
+
+                Button(select_win, text="Continue to Upload Replacement File", command=on_confirm_select, bg="#1d4ed8", fg="white", font=("Arial", 10, "bold"), pady=4).pack(pady=15)
+                return
+            elif len(error_files) == 1:
+                target_fname = error_files[0]
+            else:
+                select_win = Toplevel(self.root)
+                select_win.title("Select Error Sheet to Replace")
+                select_win.geometry("450x220")
+                select_win.transient(self.root)
+                select_win.grab_set()
+
+                Label(select_win, text="Multiple unreadable error sheets found.", font=("Arial", 11, "bold")).pack(pady=(15, 2))
+                Label(select_win, text="Select which failed student sheet image to replace:", font=("Arial", 10)).pack(pady=(0, 10))
+
+                combo_var = StringVar(value=error_files[0])
+                combo = ttk.Combobox(select_win, textvariable=combo_var, values=error_files, state="readonly", font=("Arial", 11), width=32)
+                combo.pack(pady=5)
+
+                def on_confirm_select():
+                    chosen = combo_var.get()
+                    select_win.destroy()
+                    self.replace_error_sheet(target_fname=chosen)
+
+                Button(select_win, text="Continue & Upload New Image", command=on_confirm_select, bg="#1d4ed8", fg="white", font=("Arial", 10, "bold"), pady=4).pack(pady=15)
+                return
+
+        # Prompt user to select replacement image or PDF file
+        filetypes = [("Image or PDF Files", "*.png *.jpg *.jpeg *.pdf"), ("All Files", "*.*")]
+        selected_file = filedialog.askopenfilename(
+            title=f"Select Replacement Image for Sheet '{target_fname}'",
+            filetypes=filetypes
+        )
+        if not selected_file:
+            return
+
+        dest_path = os.path.join(input_dir, target_fname)
+
+        try:
+            ext = os.path.splitext(selected_file)[1].lower()
+            if ext == ".pdf":
+                doc = fitz.open(selected_file)
+                if len(doc) > 0:
+                    page = doc.load_page(0)
+                    pix = page.get_pixmap(dpi=150)
+                    pix.save(dest_path)
+                doc.close()
+            else:
+                shutil.copy2(selected_file, dest_path)
+
+            messagebox.showinfo(
+                "Sheet Replaced",
+                f"Successfully replaced '{target_fname}' with new image scan.\n\nClick OK to re-run OMR evaluation on the updated sheet."
+            )
+
+            # Auto-trigger run_command to evaluate the replaced sheet
+            self.run_command()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to replace sheet image: {e}")
+
     # ---------- EXPORT CSV ----------
     def export_csv(self):
         if not self.current_test_data:
+            messagebox.showwarning("No Selection", "Please select a test from the left list first.")
             return
 
         output_dir = self.settings.get("output_dir")
-        csv_files = self.processor.get_csv_files(output_dir)
-        csv_files = [f for f in csv_files if os.path.basename(f) != "Option_Analysis.csv"]
+        if not output_dir or not os.path.exists(output_dir):
+            messagebox.showwarning("No Data", "Output directory does not exist. Please run OMR grading first.")
+            return
+
+        # Search both output_dir/Results and output_dir for CSV files
+        csv_files = []
+        for root_folder in [os.path.join(output_dir, "Results"), output_dir]:
+            if os.path.exists(root_folder):
+                for f in os.listdir(root_folder):
+                    if f.lower().endswith(".csv") and f.lower() != "option_analysis.csv":
+                        csv_files.append(os.path.join(root_folder, f))
 
         if not csv_files:
-            messagebox.showwarning("No CSV", "No graded CSV files found to export. Please run grading first.")
+            messagebox.showwarning("No CSV Results", "No graded CSV files found to export. Please click 'Run Command' to grade sheets first.")
             return
 
         # Use the latest CSV results file
         csv_files.sort(key=os.path.getmtime, reverse=True)
         src_csv_path = csv_files[0]
 
-        test_name = self.current_test_data.get("name", "test")
-        safe_test_name = "".join(c if c.isalnum() or c in (' ', '_', '-') else '_' for c in test_name)
-        safe_test_name = safe_test_name.replace(" ", "_")
+        test_name = str(self.current_test_data.get("name", "test"))
+        safe_test_name = "".join(c if c.isalnum() or c in (' ', '_', '-') else '_' for c in test_name).replace(" ", "_")
+        default_filename = f"student_responses_{safe_test_name}.csv"
 
-        # Ask user where to save
-        save_path = filedialog.asksaveasfilename(
-            title="Export CSV",
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            initialfile=f"student_responses_{safe_test_name}.csv"
-        )
+        user_downloads_dir = os.path.expanduser("~/Downloads")
+        if not os.path.exists(user_downloads_dir):
+            user_downloads_dir = os.path.expanduser("~")
+
+        downloads_target = os.path.join(user_downloads_dir, default_filename)
+
+        # Force lift root window to ensure dialog pops up on top
+        self.root.lift()
+        self.root.focus_force()
+
+        # Open File Dialog with default pointing to Downloads folder
+        save_path = None
+        try:
+            save_path = filedialog.asksaveasfilename(
+                parent=self.root,
+                title="Export CSV",
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                initialdir=user_downloads_dir,
+                initialfile=default_filename
+            )
+        except Exception as dialog_err:
+            print(f"File dialog error: {dialog_err}")
+
+        # If user closed or bypassed dialog, default to Downloads folder
         if not save_path:
-            return
+            save_path = downloads_target
 
         try:
             with open(src_csv_path, mode='r', newline='', encoding='utf-8') as infile:
@@ -1653,39 +2048,60 @@ class TestManagerApp:
                 fieldnames = reader.fieldnames or []
                 
                 # Identify and sort question columns (e.g. q1, q2... q60)
-                q_headers = [h for h in fieldnames if h.lower().startswith("q") and h[1:].isdigit()]
-                q_headers.sort(key=lambda x: int(x[1:]))
+                q_headers = [h for h in fieldnames if (h.lower().startswith("q") and h[1:].isdigit()) or h.isdigit()]
+                q_headers.sort(key=lambda x: int(x[1:]) if x.lower().startswith("q") else int(x))
 
                 out_headers = ["Roll"] + q_headers
 
                 rows_to_write = []
                 for row in reader:
-                    # Filter out answer key rows
+                    # Look for non-empty roll number
                     roll_val = ""
                     for key_name in ["Roll_no", "roll_no", "Roll", "roll"]:
-                        if key_name in row:
-                            roll_val = row[key_name].strip()
+                        val = row.get(key_name, "").strip()
+                        if val:
+                            roll_val = val
                             break
                     
                     file_id_val = row.get("file_id", "").strip()
-                    if roll_val.upper() == "KEY" or file_id_val == "Answer Key":
+                    if roll_val.upper() == "KEY" or file_id_val == "Answer Key" or file_id_val.upper() == "ANSWER KEY":
                         continue
+
+                    # If Roll Number is empty, fall back to file_id
                     if not roll_val:
-                        continue
-                    
+                        roll_val = file_id_val if file_id_val else "N/A"
+
+                    # Clean file extension if roll_val came from file_id (e.g. page_2.jpg -> page_2)
+                    if roll_val.lower().endswith((".jpg", ".png", ".jpeg")):
+                        roll_val = os.path.splitext(roll_val)[0]
+
                     new_row = {"Roll": roll_val}
                     for q in q_headers:
                         new_row[q] = row.get(q, "")
                     rows_to_write.append(new_row)
+
+            if not rows_to_write:
+                messagebox.showwarning("No Student Data", "No student rows were found in the results file.")
+                return
 
             with open(save_path, mode='w', newline='', encoding='utf-8') as outfile:
                 writer = csv.DictWriter(outfile, fieldnames=out_headers)
                 writer.writeheader()
                 writer.writerows(rows_to_write)
 
-            messagebox.showinfo("Success", f"CSV exported successfully to:\n{save_path}")
+            messagebox.showinfo("Export Successful", f"Successfully exported {len(rows_to_write)} student response(s) to:\n\n{save_path}")
+
+            # Open folder in macOS Finder / Windows Explorer to reveal exported CSV
+            try:
+                if sys.platform == "darwin":
+                    subprocess.run(["open", "-R", save_path])
+                elif sys.platform == "win32":
+                    subprocess.run(f'explorer /select,"{os.path.normpath(save_path)}"', shell=True)
+            except Exception as reveal_err:
+                print(f"Could not reveal file in manager: {reveal_err}")
+
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to export CSV: {e}")
+            messagebox.showerror("Export Error", f"Failed to export CSV: {e}")
 
     # ---------- VERIFY RESULTS ----------
     def verify_results(self):
