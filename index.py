@@ -41,9 +41,17 @@ def extract_roll_number(row):
     4. Concatenating individual digit columns (r1..r4, roll1..roll4) if no combined column exists.
     5. Stripping trailing .0 from numeric float representations.
     6. Fallback to cleaned file_id (removing image extensions like .jpg, .png).
+    7. Returns the exact bubbled roll number digits.
     """
     if not isinstance(row, dict):
         return ""
+
+    invalid_vals = {"", "N/A", "NONE", "NAN", "NULL", "~"}
+
+    def format_roll(val):
+        if not val or val.strip().upper() in invalid_vals or val.strip().upper() == "KEY":
+            return val
+        return val.strip()
 
     # Clean keys and values
     clean_row = {}
@@ -53,8 +61,6 @@ def extract_roll_number(row):
             if val_str.endswith(".0") and val_str[:-2].isdigit():
                 val_str = val_str[:-2]
             clean_row[k.strip()] = val_str
-
-    invalid_vals = {"", "N/A", "NONE", "NAN", "NULL", "~"}
 
     # 1. Check for Answer Key row
     file_id_val = clean_row.get("file_id", "").strip()
@@ -72,7 +78,7 @@ def extract_roll_number(row):
         if k in clean_row:
             v = clean_row[k]
             if v and v.upper() not in invalid_vals and v.upper() != "KEY":
-                return v
+                return format_roll(v)
 
     # 3. Flexible search for keys containing 'roll' or 'student'
     excluded_keys = {
@@ -83,7 +89,7 @@ def extract_roll_number(row):
         k_lower = k.lower().replace(" ", "_").replace("-", "_")
         if ("roll" in k_lower or "student" in k_lower) and k_lower not in excluded_keys:
             if v and v.upper() not in invalid_vals and v.upper() != "KEY":
-                return v
+                return format_roll(v)
 
     # 4. Check for unconcatenated digit columns (r1, r2, r3... or roll1, roll2...)
     r_keys = [
@@ -97,12 +103,12 @@ def extract_roll_number(row):
         r_keys.sort(key=r_key_sort)
         concat_val = "".join(clean_row[k] for k in r_keys if clean_row[k].upper() not in invalid_vals)
         if concat_val:
-            return concat_val
+            return format_roll(concat_val)
 
     # 5. Fallback to file_id
     if file_id_val and file_id_val.upper() not in ["ANSWER KEY", "KEY"]:
         cleaned = os.path.splitext(file_id_val)[0]
-        return cleaned
+        return format_roll(cleaned)
 
     return ""
 
@@ -356,7 +362,7 @@ class PDFProcessor:
                 dst_img_path = os.path.join(input_dir, dst_img_name)
                 try:
                     shutil.copy2(first_page_path, dst_img_path)
-                    os.remove(first_page_path)
+                    # os.remove(first_page_path) # Removed so the first page is graded and its score is shown
                 except Exception as e:
                     print(f"Error copying first page as answer key: {e}")
                     return
