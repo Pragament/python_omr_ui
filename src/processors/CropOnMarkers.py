@@ -41,6 +41,7 @@ class CropOnMarkers(ImagePreprocessor):
         )
         self.marker_rescale_steps = int(marker_ops.get("marker_rescale_steps", 10))
         self.apply_erode_subtract = marker_ops.get("apply_erode_subtract", True)
+        self.max_corner_deviation = marker_ops.get("max_corner_deviation", 0.1)
         self.marker = self.load_marker(marker_ops, config)
 
     def __str__(self):
@@ -152,6 +153,49 @@ class CropOnMarkers(ImagePreprocessor):
             )
             centres.append([pt[0] + w / 2, pt[1] + _h / 2])
             sum_t += max_t
+
+        # Sanity check: the 4 quadrant matches should form an (approximately)
+        # axis-aligned rectangle, since each is searched independently within its
+        # own quadrant. A dense cluster of marked bubbles or other page content can
+        # sometimes out-score a faint/weak true marker within its quadrant, locking
+        # onto a false positive far from the real corner. That still "succeeds" by
+        # the per-quad threshold check above, but silently produces a corrupted
+        # perspective warp (and downstream, corrupted bubble reads). Catch that here
+        # by rejecting matches whose corners are inconsistent with a rectangle,
+        # rather than let it through.
+        top_left, top_right, bottom_left, bottom_right = centres
+        max_x_dev = self.max_corner_deviation * midw
+        max_y_dev = self.max_corner_deviation * midh
+        x_dev = max(
+            abs(top_left[0] - bottom_left[0]), abs(top_right[0] - bottom_right[0])
+        )
+        y_dev = max(
+            abs(top_left[1] - top_right[1]), abs(bottom_left[1] - bottom_right[1])
+        )
+        if x_dev > max_x_dev or y_dev > max_y_dev:
+            logger.error(
+                file_path,
+                "\nError: Marker corners do not form a consistent rectangle"
+                " (likely a false-positive match on page content)",
+                "\n\t centres",
+                centres,
+                "\t x_dev",
+                round(x_dev, 1),
+                "\t y_dev",
+                round(y_dev, 1),
+                "\t max_x_dev",
+                round(max_x_dev, 1),
+                "\t max_y_dev",
+                round(max_y_dev, 1),
+            )
+            if config.outputs.show_image_level >= 1:
+                InteractionUtils.show(
+                    f"Inconsistent markers: {file_path}",
+                    image_eroded_sub,
+                    0,
+                    config=config,
+                )
+            return None
 
         logger.info(quarter_match_log)
         logger.info(f"Optimal Scale: {best_scale}")

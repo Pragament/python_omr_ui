@@ -347,14 +347,28 @@ class ImageInstanceOps:
                                 -1,
                             )
 
+                    is_digit_col = (
+                        getattr(field_block, "field_type", "") in ["QTYPE_INT", "QTYPE_INT_FROM_1"]
+                        or field_block.name.startswith("r")
+                        or field_block.name.startswith("roll")
+                        or all(str(b.field_value).isdigit() for b in field_block_bubbles)
+                    )
+
+                    # Digit/integer columns (e.g. roll numbers) can only hold a single
+                    # digit each. Noisy scans/faint marks can cause more than one bubble
+                    # in the same column to cross the marking threshold; concatenating
+                    # them all (as done for genuine multi-select MCQ fields) would corrupt
+                    # a single digit into a garbled multi-character string. Collapse to the
+                    # single darkest bubble instead, while still flagging the sheet as
+                    # multi-marked so it gets routed for manual review.
+                    if is_digit_col and len(detected_bubbles) > 1:
+                        strip_vals = all_q_vals[strip_start_box_no:total_q_box_no]
+                        min_idx = strip_vals.index(min(strip_vals))
+                        detected_bubbles = [field_block_bubbles[min_idx]]
+                        multi_marked = True
+
                     # Fallback for faint bubbles in single-selection digit/integer columns (e.g. roll numbers)
                     if len(detected_bubbles) == 0 and len(field_block_bubbles) > 2:
-                        is_digit_col = (
-                            getattr(field_block, "field_type", "") in ["QTYPE_INT", "QTYPE_INT_FROM_1"]
-                            or field_block.name.startswith("r")
-                            or field_block.name.startswith("roll")
-                            or all(str(b.field_value).isdigit() for b in field_block_bubbles)
-                        )
                         if is_digit_col:
                             strip_vals = all_q_vals[strip_start_box_no:total_q_box_no]
                             min_val = min(strip_vals)
