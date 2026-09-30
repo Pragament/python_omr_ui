@@ -12,7 +12,7 @@
       "name": "CropOnMarkers",
       "options": {
         "relativePath": "omr_marker.jpg",
-        "sheetToMarkerWidthRatio": 5
+        "sheetToMarkerWidthRatio": 9
       }
     }
   ],
