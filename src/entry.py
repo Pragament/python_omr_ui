@@ -318,13 +318,6 @@ def _process_single_image(
     for k in template.output_columns:
         resp_array.append(omr_response[k])
 
-    if img_name.startswith("page_1."):
-        # Set Roll_no to "KEY"
-        if "Roll_no" in template.output_columns:
-            idx = template.output_columns.index("Roll_no")
-            resp_array[idx] = "KEY"
-        img_name = "Answer Key"
-
     outputs_namespace.OUTPUT_SET.append([img_name] + resp_array)
 
     if multi_marked == 0 or not tuning_config.outputs.filter_out_multimarked_files:
@@ -375,45 +368,6 @@ def process_files(
         "error_count": 0,
         "error_details": [],
     }
-
-    # 1. Parse the first page of the PDF (the teacher's key sheet) to get the answer key
-    if omr_files and evaluation_config is not None:
-        key_file = omr_files[0]
-        try:
-            images = ImageUtils.load_omr_image(key_file, tuning_config)
-            for img_name, in_omr in images:
-                in_omr_preprocessed = template.image_instance_ops.apply_preprocessors(
-                    img_name, in_omr, template
-                )
-                if in_omr_preprocessed is not None:
-                    response_dict, _, _, _ = template.image_instance_ops.read_omr_response(
-                        template, image=in_omr_preprocessed, name=str(img_name), save_dir=None
-                    )
-                    key_response = get_concatenated_response(response_dict, template)
-                    
-                    # Update evaluation_config answer key with these parsed answers
-                    parsed_answers = []
-                    for q in evaluation_config.questions_in_order:
-                        ans = key_response.get(q, "")
-                        parsed_answers.append(ans)
-                        
-                    evaluation_config.question_to_answer_matcher = evaluation_config.parse_answers_and_map_questions(
-                        parsed_answers
-                    )
-                    logger.info(f"Loaded answer key from first page ({img_name}).")
-                    
-                    # Also write these parsed answers to answer_key.csv in the input directory
-                    csv_path = Path(evaluation_config.path).parent.joinpath("answer_key.csv")
-                    with open(csv_path, 'w') as f:
-                        for q in evaluation_config.questions_in_order:
-                            ans = key_response.get(q, "")
-                            f.write(f"{q},{ans}\n")
-                    logger.info(f"Saved parsed answer key to {csv_path}")
-        except Exception as e:
-            if getattr(evaluation_config, "question_to_answer_matcher", None):
-                logger.info("Using pre-configured answer key file.")
-            else:
-                logger.info(f"First page is a student sheet (no key auto-extracted). Using configured key settings.")
 
     # Collect images first to get accurate count for live progress
     sheet_items = []

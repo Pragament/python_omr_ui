@@ -209,16 +209,26 @@ class EvaluationConfig:
 
             answer_key_image_path = options.get("answer_key_image_path", None)
             if os.path.exists(csv_path):
-                # TODO: CSV parsing/validation for each row with a (qNo, <ans string/>) pair
-                answer_key = pd.read_csv(
-                    csv_path,
-                    header=None,
-                    names=["question", "answer"],
-                    converters={"question": str, "answer": self.parse_answer_column},
-                )
+                import csv
+                questions = []
+                answers = []
+                with open(csv_path, "r", encoding="utf-8-sig") as f:
+                    reader = csv.reader(f)
+                    for row in reader:
+                        if not row or not any(field and field.strip() for field in row):
+                            continue
+                        clean_row = [field.strip() for field in row if field is not None]
+                        if not clean_row:
+                            continue
+                        q_raw = clean_row[0]
+                        if q_raw.lower() in ["question", "q", "q_no", "qno", "sr.no", "sr_no", "s.no", "s_no", "item"]:
+                            continue
+                        ans_raw = clean_row[-1]
+                        questions.append(q_raw)
+                        answers.append(self.parse_answer_column(ans_raw))
 
-                self.questions_in_order = answer_key["question"].to_list()
-                answers_in_order = answer_key["answer"].to_list()
+                self.questions_in_order = questions
+                answers_in_order = answers
             elif not answer_key_image_path:
                 raise Exception(f"Answer key csv not found at '{csv_path}'")
             else:
@@ -295,12 +305,31 @@ class EvaluationConfig:
             answers_in_order = options["answers_in_order"]
 
         # Filter questions and answers to only keep those present in the template's output columns
+        col_map = {}
+        for col in template.output_columns:
+            col_map[col] = col
+            col_map[col.lower()] = col
+            col_map[col.upper()] = col
+            if col.lower().startswith("q") and col[1:].isdigit():
+                col_map[col[1:]] = col
+
         filtered_questions = []
         filtered_answers = []
         for q, ans in zip(self.questions_in_order, answers_in_order):
-            if q in template.output_columns:
-                filtered_questions.append(q)
+            matched_q = None
+            if q in col_map:
+                matched_q = col_map[q]
+            elif q.lower() in col_map:
+                matched_q = col_map[q.lower()]
+            elif f"q{q}" in col_map:
+                matched_q = col_map[f"q{q}"]
+            elif f"q{q.lower()}" in col_map:
+                matched_q = col_map[f"q{q.lower()}"]
+
+            if matched_q:
+                filtered_questions.append(matched_q)
                 filtered_answers.append(ans)
+
         self.questions_in_order = filtered_questions
         answers_in_order = filtered_answers
 

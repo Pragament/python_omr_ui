@@ -1,11 +1,11 @@
 {
   "pageDimensions": [
-    691,
-    954
+    1896,
+    2121
   ],
   "bubbleDimensions": [
-    15,
-    15
+    40,
+    40
   ],
   "preProcessors": [
     {
@@ -25,11 +25,11 @@
     "r1": {
       "fieldType": "QTYPE_INT",
       "origin": [
-        8,
-        80
+        18,
+        224
       ],
-      "bubblesGap": 23.5,
-      "labelsGap": 18,
+      "bubblesGap": 63.0,
+      "labelsGap": 52.6,
       "fieldLabels": [
         "r1..4"
       ]
@@ -37,11 +37,11 @@
     "q1": {
       "fieldType": "QTYPE_MCQ4",
       "origin": [
-        18,
-        429
+        53,
+        955
       ],
-      "bubblesGap": 19.6,
-      "labelsGap": 24.36,
+      "bubblesGap": 52.6,
+      "labelsGap": 53.7,
       "fieldLabels": [
         "q1..20"
       ]
@@ -49,11 +49,11 @@
     "q2": {
       "fieldType": "QTYPE_MCQ4",
       "origin": [
-        134,
-        429
+        372,
+        955
       ],
-      "bubblesGap": 19.8,
-      "labelsGap": 24.36,
+      "bubblesGap": 52.6,
+      "labelsGap": 53.7,
       "fieldLabels": [
         "q21..35"
       ]
@@ -61,11 +61,11 @@
     "q3": {
       "fieldType": "QTYPE_MCQ4",
       "origin": [
-        250,
-        429
+        691,
+        955
       ],
-      "bubblesGap": 19.6,
-      "labelsGap": 24.36,
+      "bubblesGap": 52.6,
+      "labelsGap": 53.7,
       "fieldLabels": [
         "q36..50"
       ]
@@ -73,11 +73,11 @@
     "q4": {
       "fieldType": "QTYPE_MCQ4",
       "origin": [
-        366,
-        429
+        1010,
+        955
       ],
-      "bubblesGap": 19.9,
-      "labelsGap": 24.36,
+      "bubblesGap": 52.6,
+      "labelsGap": 53.7,
       "fieldLabels": [
         "q51..60"
       ]
